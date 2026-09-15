@@ -76,6 +76,9 @@ if (Test-Path "$script:TargetDir\app.py") {
             Write-Host "[*] Removing Start Menu shortcut if present..." -ForegroundColor Gray
             Remove-Item "$OriginalAppData\Microsoft\Windows\Start Menu\Programs\Network Diagnostics.lnk" -ErrorAction SilentlyContinue
             
+            Write-Host "[*] Removing UAC Bypass task if present..." -ForegroundColor Gray
+            schtasks.exe /delete /tn "NetworkDiagnostics_NoUAC" /f 2>$null
+            
             # --- BACKUP LOGIC (DATABASE ONLY) ---
             if ($keepDb -match '^[Yy]') {
                 Write-Host "[*] Backing up database files..." -ForegroundColor Cyan
@@ -452,54 +455,104 @@ if (Test-Path $startupLnk) {
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
 
 # ---------------------------------------------------------
-# 11. DESKTOP SHORTCUT CREATION
+# 11 & 12. SHORTCUT CREATION & UAC BYPASS
 # ---------------------------------------------------------
 Write-Host ""
+Write-Host "--------------------------------------------------------" -ForegroundColor Gray
+
 $deskLnk = Join-Path $OriginalDesktop 'Network Diagnostics.lnk'
-
-if (Test-Path $deskLnk) {
-    Write-Host "[✓] Desktop shortcut already exists." -ForegroundColor Green
-} else {
-    $createDesktop = Read-Host "[?] Do you want to create a Desktop shortcut? (y/N)"
-    if ($createDesktop -match '^[Yy]') {
-        Write-Host "    [*] Generating Desktop shortcut..." -ForegroundColor Cyan
-        $ws = New-Object -ComObject WScript.Shell
-        $sc = $ws.CreateShortcut($deskLnk)
-        $sc.TargetPath = $script:PythonCmd
-        $sc.Arguments = "`"$script:TargetDir\setup_env.py`""
-        $sc.WorkingDirectory = $script:TargetDir
-        if (Test-Path $icoPath) { 
-            $sc.IconLocation = "$icoPath,0" 
-        }
-        $sc.Save()
-        Write-Host "[✓] Desktop shortcut created successfully." -ForegroundColor Green
-    }
-}
-
-# ---------------------------------------------------------
-# 12. START MENU SHORTCUT CREATION
-# ---------------------------------------------------------
-Write-Host ""
 $startMenuPath = Join-Path $OriginalAppData 'Microsoft\Windows\Start Menu\Programs'
 $startLnk = Join-Path $startMenuPath 'Network Diagnostics.lnk'
+$icoPath = Join-Path $script:TargetDir 'static\favicon.ico'
 
-if (Test-Path $startLnk) {
-    Write-Host "[✓] Start Menu shortcut already exists." -ForegroundColor Green
-} else {
-    $createStartMenu = Read-Host "[?] Do you want to create a Start Menu shortcut? (y/N)"
+$createDesktop = Read-Host "[?] Do you want to create a Desktop shortcut? (y/N)"
+$createStartMenu = Read-Host "[?] Do you want to create a Start Menu shortcut? (y/N)"
+
+if ($createDesktop -match '^[Yy]' -or $createStartMenu -match '^[Yy]') {
+    
+    $shortcutTarget = $script:PythonCmd
+    $shortcutArgs = "`"$script:TargetDir\setup_env.py`""
+    
+    $bypassUAC = Read-Host "    [?] Do you want these shortcuts to launch WITHOUT asking for Administrator approval (UAC prompt)? (y/N)"
+    if ($bypassUAC -match '^[Yy]') {
+        Write-Host "        [*] Configuring passwordless/UAC-free execution via Task Scheduler..." -ForegroundColor Cyan
+        $taskName = "NetworkDiagnostics_NoUAC"
+        
+        # XML definition to force the task to run with Highest Privileges for the active user
+        $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$script:PythonCmd</Command>
+      <Arguments>"$script:TargetDir\setup_env.py"</Arguments>
+      <WorkingDirectory>$script:TargetDir</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
+        $xmlPath = "$env:TEMP\nd_task.xml"
+        $xml | Out-File -FilePath $xmlPath -Encoding Unicode
+        schtasks.exe /create /tn $taskName /xml $xmlPath /f | Out-Null
+        Remove-Item $xmlPath -ErrorAction SilentlyContinue
+        
+        # Override the shortcut targets to run the task instead
+        $shortcutTarget = "schtasks.exe"
+        $shortcutArgs = "/run /tn `"$taskName`""
+        Write-Host "        [✓] Scheduled task created for UAC bypass." -ForegroundColor Green
+    }
+    
+    $ws = New-Object -ComObject WScript.Shell
+    
+    if ($createDesktop -match '^[Yy]') {
+        Write-Host "    [*] Generating Desktop shortcut..." -ForegroundColor Cyan
+        $sc = $ws.CreateShortcut($deskLnk)
+        $sc.TargetPath = $shortcutTarget
+        $sc.Arguments = $shortcutArgs
+        if (-not ($shortcutTarget -match "schtasks")) {
+            $sc.WorkingDirectory = $script:TargetDir
+        }
+        if (Test-Path $icoPath) { $sc.IconLocation = "$icoPath,0" }
+        # If using schtasks, set WindowStyle to 7 (Minimized) to hide the brief command prompt flash
+        if ($shortcutTarget -match "schtasks") { $sc.WindowStyle = 7 }
+        $sc.Save()
+        Write-Host "        [✓] Desktop shortcut created." -ForegroundColor Green
+    }
+    
     if ($createStartMenu -match '^[Yy]') {
         Write-Host "    [*] Generating Start Menu shortcut..." -ForegroundColor Cyan
         if (-not (Test-Path $startMenuPath)) { New-Item -ItemType Directory -Path $startMenuPath | Out-Null }
-        $ws = New-Object -ComObject WScript.Shell
         $sc = $ws.CreateShortcut($startLnk)
-        $sc.TargetPath = $script:PythonCmd
-        $sc.Arguments = "`"$script:TargetDir\setup_env.py`""
-        $sc.WorkingDirectory = $script:TargetDir
-        if (Test-Path $icoPath) { 
-            $sc.IconLocation = "$icoPath,0" 
+        $sc.TargetPath = $shortcutTarget
+        $sc.Arguments = $shortcutArgs
+        if (-not ($shortcutTarget -match "schtasks")) {
+            $sc.WorkingDirectory = $script:TargetDir
         }
+        if (Test-Path $icoPath) { $sc.IconLocation = "$icoPath,0" }
+        if ($shortcutTarget -match "schtasks") { $sc.WindowStyle = 7 }
         $sc.Save()
-        Write-Host "[✓] Start Menu shortcut created successfully." -ForegroundColor Green
+        Write-Host "        [✓] Start Menu shortcut created." -ForegroundColor Green
     }
 }
 
