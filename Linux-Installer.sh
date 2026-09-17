@@ -39,7 +39,7 @@ SERVICE_NAME="network-dashboard.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
 AUTOSTART_DIR="$HOME/.config/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/Network-Diagnostics.desktop"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
 # --- 2. EXISTING INSTALLATION CHECK & UNINSTALL OPTION ---
 if [ -d "$TARGET_DIR" ]; then
@@ -596,7 +596,10 @@ if [ "$SERVICE_ACTIVE" = false ]; then
     if pgrep -f "setup_env.py" > /dev/null; then
         echo "   [✓] Network Diagnostics is already running. Skipping launch."
     else
+        echo "   [*] Launching Network Diagnostics Dashboard..."
+        
+        # Ensure we lock the working directory to the target path before launching
         cd "$TARGET_DIR" || exit
-        python3 setup_env.py
+        python3 "$TARGET_DIR/setup_env.py"
     fi
 fi

@@ -27,7 +27,7 @@ TOKEN=""
 APP_DIR="/Applications"
 APP_PATH="$APP_DIR/Network Diagnostics.app"
 DAEMON_PLIST="/Library/LaunchDaemons/com.network.diagnostics.plist"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
 # --- 2. EXISTING INSTALLATION CHECK & UNINSTALL OPTION ---
 if [ -d "$TARGET_DIR" ]; then
@@ -505,7 +505,16 @@ if [ "$SERVICE_ACTIVE" = false ]; then
     if pgrep -f "setup_env.py" > /dev/null; then
         echo "   [✓] Network Diagnostics is already running. Skipping launch."
     else
-        cd "$TARGET_DIR" || exit
-        python3 setup_env.py
+        echo "   [*] Launching Network Diagnostics Dashboard..."
+        
+        # Check if the native .app bundle exists, and seamlessly launch it if so
+        if [ -d "$APP_PATH" ]; then
+            echo "       [*] Opening macOS Application Bundle ($APP_PATH)..."
+            open "$APP_PATH"
+        else
+            echo "       [*] Launching via Python Terminal..."
+            cd "$TARGET_DIR" || exit
+            python3 "$TARGET_DIR/setup_env.py"
+        fi
     fi
 fi

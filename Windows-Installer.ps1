@@ -46,7 +46,7 @@ $script:RepoOwner = "Chrisb003"
 $script:RepoName  = "Network-Testing-Tools"
 $script:Branch    = "main"
 $script:Token     = ""
-$script:Version   = "1.0.0"
+$script:Version   = "1.0.1"
 
 # Set to TEMP since in-memory scripts do not have a $PSScriptRoot
 Set-Location $env:TEMP
@@ -612,12 +612,22 @@ if (-not $script:PythonCmd) {
 Write-Host "[*] Checking for running instances..." -ForegroundColor Cyan
 
 # Query Windows processes to see if Python is currently running setup_env.py
-$isRunning = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "setup_env.py" }
+$isRunning = Get-CimInstance Win32_Process \vert{} Where-Object {$_.CommandLine -match "setup_env.py" }
 
 if ($isRunning) {
     Write-Host "[✓] Network Diagnostics is already running. Skipping launch." -ForegroundColor Green
 } else {
-    Write-Host "[*] Launching Setup Script from $script:TargetDir..." -ForegroundColor Cyan
-    Set-Location $script:TargetDir
-    & $script:PythonCmd setup_env.py
+    Write-Host "[*] Launching Network Diagnostics Dashboard..." -ForegroundColor Cyan
+    
+    # Check if the UAC Bypass Scheduled Task exists on the system
+    schtasks.exe /query /tn "NetworkDiagnostics_NoUAC" 2>$null | Out-Null
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "    [*] Launching seamlessly via UAC-Bypass Task..." -ForegroundColor Gray
+        schtasks.exe /run /tn "NetworkDiagnostics_NoUAC" | Out-Null
+    } else {
+        Write-Host "    [*] Launching via Python..." -ForegroundColor Gray
+        # Launch in a new process to enforce the Working Directory and detach from the installer
+        Start-Process -FilePath $script:PythonCmd -ArgumentList "`"$script:TargetDir\setup_env.py`"" -WorkingDirectory $script:TargetDir
+    }
 }

@@ -1,2 +1,5 @@
 V1.0.0
 Release version
+
+V1.0.1
+code start up changes. Script now correctly starts the app once installed.
