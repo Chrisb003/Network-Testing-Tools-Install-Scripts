@@ -19,7 +19,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     # Check if running from memory (no file path) or from a local file
     if ([string]::IsNullOrEmpty($PSCommandPath)) {
         # Re-run the in-memory download command for the elevated session
-        $MemCommand = "& ([scriptblock]::Create((irm 'https://chris94.uk/install-scripts/Windows-Installer.ps1'))) -OriginalProfile `'$OriginalProfile`' -OriginalDesktop `'$OriginalDesktop`' -OriginalAppData `'$OriginalAppData`'"
+        $MemCommand = "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Chrisb003/Network-Testing-Tools-Install-Scripts/refs/heads/main/Windows-Installer.ps1'))) -OriginalProfile `'$OriginalProfile`' -OriginalDesktop `'$OriginalDesktop`' -OriginalAppData `'$OriginalAppData`'"
         $Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $MemCommand)
     } else {
         # Pass the original user's directories into the elevated Admin session using the local file
