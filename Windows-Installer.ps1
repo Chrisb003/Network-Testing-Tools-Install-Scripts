@@ -46,7 +46,7 @@ $script:RepoOwner = "Chrisb003"
 $script:RepoName  = "Network-Testing-Tools"
 $script:Branch    = "main"
 $script:Token     = ""
-$script:Version   = "1.0.3"
+$script:Version   = "1.0.4"
 
 # Set to TEMP since in-memory scripts do not have a $PSScriptRoot
 Set-Location $env:TEMP
@@ -205,7 +205,46 @@ if ($script:PythonCmd) {
 }
 
 # ---------------------------------------------------------
-# 6. CHECK FOR INTERNET CONNECTIVITY
+# 6. CHECK AND INSTALL NPCAP (IF MISSING)
+# ---------------------------------------------------------
+Write-Host ""
+Write-Host "--------------------------------------------------------" -ForegroundColor Gray
+
+if (-not $SkipPrereqs) {
+    $npcapInstalled = Test-Path "$env:SystemRoot\System32\Npcap"
+
+    if ($npcapInstalled) {
+        Write-Host "[✓] Npcap is already detected on this system. Skipping installation." -ForegroundColor Green
+    } else {
+        Write-Host "[!] Npcap is required for network packet capture features." -ForegroundColor Yellow
+        Write-Host "    (The free version requires you to click through the installer manually)." -ForegroundColor Gray
+        $installNpcap = Read-Host "[?] Do you want to download and install Npcap now? (y/N)"
+
+        if ($installNpcap -match '^[Yy]') {
+            Write-Host "    [*] Downloading the latest Npcap installer..." -ForegroundColor Cyan
+            
+            $npcapUrl = "https://npcap.com/dist/npcap-1.88.exe"
+            $npcapInstaller = "$env:TEMP\npcap_installer.exe"
+            
+            Invoke-WebRequest -Uri $npcapUrl -OutFile $npcapInstaller -UseBasicParsing
+            
+            Write-Host "    [*] Launching Npcap installer. Please complete the installation window that pops up." -ForegroundColor Yellow
+            
+            Start-Process -FilePath $npcapInstaller -Wait
+            
+            Remove-Item $npcapInstaller -Force -ErrorAction SilentlyContinue
+            Write-Host "    [✓] Npcap installation step completed." -ForegroundColor Green
+        } else {
+            Write-Host "    [*] Skipping Npcap installation." -ForegroundColor Gray
+        }
+    }
+} else {
+    Write-Host "[*] Skipping Npcap checks due to prerequisite bypass." -ForegroundColor Gray
+}
+Write-Host "--------------------------------------------------------" -ForegroundColor Gray
+
+# ---------------------------------------------------------
+# 7. CHECK FOR INTERNET CONNECTIVITY
 # ---------------------------------------------------------
 if (-not $SkipPrereqs) {
     Write-Host ""
@@ -224,7 +263,7 @@ if (-not $SkipPrereqs) {
 }
 
 # ---------------------------------------------------------
-# 7. DOWNLOAD OR UPDATE CODE FROM GITHUB
+# 8. DOWNLOAD OR UPDATE CODE FROM GITHUB
 # ---------------------------------------------------------
 Write-Host ""
 Write-Host "[*] Managing application files..." -ForegroundColor Cyan
@@ -297,7 +336,7 @@ if (-not (Test-Path "$script:TargetDir\app.py")) {
 }
 
 # ---------------------------------------------------------
-# 8. APP CONFIGURATION & DEDICATED DEVICE
+# 9. APP CONFIGURATION & DEDICATED DEVICE
 # ---------------------------------------------------------
 Write-Host ""
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
@@ -389,14 +428,14 @@ if ($isDedicated -match '^[Yy]') {
 }
 
 # ---------------------------------------------------------
-# 9. FIX DIRECTORY PERMISSIONS FOR ALL USERS
+# 10. FIX DIRECTORY PERMISSIONS FOR ALL USERS
 # ---------------------------------------------------------
 Write-Host "    [*] Unlocking folder permissions for all users..." -ForegroundColor Cyan
 icacls "$script:TargetDir" /grant "Everyone:(F)" /T /C /Q | Out-Null
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
 
 # ---------------------------------------------------------
-# 10. OPTIONAL USER-LOGIN STARTUP (STARTUP FOLDER)
+# 11. OPTIONAL USER-LOGIN STARTUP (STARTUP FOLDER)
 # ---------------------------------------------------------
 Write-Host ""
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
@@ -451,7 +490,7 @@ if (Test-Path $startupLnk) {
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
 
 # ---------------------------------------------------------
-# 11 & 12. SHORTCUT CREATION & UAC BYPASS
+# 12 & 13. SHORTCUT CREATION & UAC BYPASS
 # ---------------------------------------------------------
 Write-Host ""
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
@@ -559,45 +598,6 @@ if ($createDesktop -match '^[Yy]' -or $createStartMenu -match '^[Yy]') {
         Write-Host "        [✓] Start Menu shortcut created." -ForegroundColor Green
     }
 }
-
-# ---------------------------------------------------------
-# 13. CHECK AND INSTALL NPCAP (IF MISSING)
-# ---------------------------------------------------------
-Write-Host ""
-Write-Host "--------------------------------------------------------" -ForegroundColor Gray
-
-if (-not $SkipPrereqs) {
-    $npcapInstalled = Test-Path "$env:SystemRoot\System32\Npcap"
-
-    if ($npcapInstalled) {
-        Write-Host "[✓] Npcap is already detected on this system. Skipping installation." -ForegroundColor Green
-    } else {
-        Write-Host "[!] Npcap is required for network packet capture features." -ForegroundColor Yellow
-        Write-Host "    (The free version requires you to click through the installer manually)." -ForegroundColor Gray
-        $installNpcap = Read-Host "[?] Do you want to download and install Npcap now? (y/N)"
-
-        if ($installNpcap -match '^[Yy]') {
-            Write-Host "    [*] Downloading the latest Npcap installer..." -ForegroundColor Cyan
-            
-            $npcapUrl = "https://npcap.com/dist/npcap-1.88.exe"
-            $npcapInstaller = "$env:TEMP\npcap_installer.exe"
-            
-            Invoke-WebRequest -Uri $npcapUrl -OutFile $npcapInstaller -UseBasicParsing
-            
-            Write-Host "    [*] Launching Npcap installer. Please complete the installation window that pops up." -ForegroundColor Yellow
-            
-            Start-Process -FilePath $npcapInstaller -Wait
-            
-            Remove-Item $npcapInstaller -Force -ErrorAction SilentlyContinue
-            Write-Host "    [✓] Npcap installation step completed." -ForegroundColor Green
-        } else {
-            Write-Host "    [*] Skipping Npcap installation." -ForegroundColor Gray
-        }
-    }
-} else {
-    Write-Host "[*] Skipping Npcap checks due to prerequisite bypass." -ForegroundColor Gray
-}
-Write-Host "--------------------------------------------------------" -ForegroundColor Gray
 
 # ---------------------------------------------------------
 # 14. FINAL SUMMARY & LAUNCH

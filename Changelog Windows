@@ -9,3 +9,6 @@ Fixed banner showing twice. And the shortcut it creates now starts the script wi
 
 V1.0.3
 Previous fix broke the script. Here is the hopefully fix version.
+
+V1.0.4
+Reordered parts of the script arround so it does the requirements at the same time.
