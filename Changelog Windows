@@ -6,3 +6,6 @@ code start up changes. Script now correctly starts the app once installed.
 
 V1.0.2
 Fixed banner showing twice. And the shortcut it creates now starts the script with the window hidden.
+
+V1.0.3
+Previous fix broke the script. Here is the hopefully fix version.
