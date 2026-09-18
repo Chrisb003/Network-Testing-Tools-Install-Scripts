@@ -63,9 +63,7 @@ if (Test-Path "$script:TargetDir\app.py") {
     Write-Host ""
     Write-Host "[*] Existing installation detected at $script:TargetDir." -ForegroundColor Cyan
     $removeApp = Read-Host "[?] Do you want to REMOVE the existing installation? (y/N)"
-    if ($removeApp -match '^[Yy]') {
-        
-        $keepDb = Read-Host "[?] Do you want to KEEP your database files? (y/N)"
+    if ($removeApp -match '^[Yy]') {$keepDb = Read-Host "[?] Do you want to KEEP your database files? (y/N)"
         $confirmWipe = Read-Host "[?] Are you ABSOLUTELY sure you want to uninstall? Type 'yes' to confirm"
         
         if ($confirmWipe -eq 'yes') {
@@ -82,11 +80,11 @@ if (Test-Path "$script:TargetDir\app.py") {
             # --- BACKUP LOGIC (DATABASE ONLY) ---
             if ($keepDb -match '^[Yy]') {
                 Write-Host "[*] Backing up database files..." -ForegroundColor Cyan
-                $backupDir = Join-Path $OriginalDesktop "Network-Diagnostics-Backup"
-                if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir | Out-Null }
+                $backupDir = Join-Path$OriginalDesktop "Network-Diagnostics-Backup"
+                if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path$backupDir | Out-Null }
                 
                 # Copies ONLY database files
-                Get-ChildItem -Path $script:TargetDir -Include *.db, *.sqlite -Recurse -ErrorAction SilentlyContinue | Copy-Item -Destination $backupDir -Force
+                Get-ChildItem -Path $script:TargetDir -Include *.db, *.sqlite -Recurse -ErrorAction SilentlyContinue \vert{} Copy-Item -Destination$backupDir -Force
                 
                 # Ensure the original user has full permissions to edit or delete the backed-up files despite Admin execution
                 icacls "$backupDir" /grant "Everyone:(F)" /T /C /Q | Out-Null
@@ -112,23 +110,21 @@ Write-Host "Diagnostics Dashboard, Python dependencies, and tools." -ForegroundC
 Write-Host ""
 $proceed = Read-Host "[?] Do you want to proceed with the installation of system prerequisites? (y/N)"
 
-$SkipPrereqs = $false
+$SkipPrereqs =$false
 if ($proceed -notmatch '^[Yy]') {
     Write-Host "[*] Skipping system prerequisites. Moving to application updates and configuration..." -ForegroundColor Yellow
-    $SkipPrereqs = $true
+    $SkipPrereqs =$true
 }
 
 # ---------------------------------------------------------
 # 5. CHECK FOR PYTHON (AUTO-DOWNLOAD FROM PYTHON.ORG)
 # ---------------------------------------------------------
-if (-not $SkipPrereqs) {
-    $pythonTest = Get-Command python -ErrorAction SilentlyContinue
+if (-not $SkipPrereqs) {$pythonTest = Get-Command python -ErrorAction SilentlyContinue
 
     # Verify it isn't the fake Windows Store shortcut
-    if ($pythonTest) {
-        $testOutput = python --version 2>&1 | Out-String
+    if ($pythonTest) {$testOutput = python --version 2>&1 | Out-String
         if ($testOutput -match "Python was not found") {
-            $pythonTest = $null # Force the script to treat Python as missing
+            $pythonTest =$null # Force the script to treat Python as missing
         }
     }
 
@@ -141,11 +137,11 @@ if (-not $SkipPrereqs) {
         $pyUrl = "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-amd64.exe"
         $installerPath = "$env:TEMP\python_installer.exe"
         
-        Invoke-WebRequest -Uri $pyUrl -OutFile $installerPath
+        Invoke-WebRequest -Uri $pyUrl -OutFile$installerPath
         
         Write-Host "[*] Installing Python silently (this may take a minute). Please wait..." -ForegroundColor Yellow
         $installArgs = "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0"
-        Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait
+        Start-Process -FilePath $installerPath -ArgumentList$installArgs -Wait
         
         Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
         
@@ -161,46 +157,43 @@ if (-not $SkipPrereqs) {
 }
 
 # Explicitly find a working python.exe (Bypasses Windows Store alias issues)
-$script:PythonCmd = $null
-$allPy = Get-Command python -All -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-foreach ($p in $allPy) {
-    $testOut = & $p --version 2>&1 | Out-String
+$script:PythonCmd = $null$allPy = Get-Command python -All -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+foreach ($p in$allPy) {
+    $testOut = &$p --version 2>&1 | Out-String
     if ($testOut -match "Python") {
-        $script:PythonCmd = $p
+        $script:PythonCmd =$p
         break
     }
 }
 
 # Fallback if PowerShell hasn't updated its command cache after a fresh installation
-if (-not $script:PythonCmd) {
-    $fallbackPaths = @(
+if (-not $script:PythonCmd) {$fallbackPaths = @(
         "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe",
         "C:\Program Files\Python*\python.exe",
         "C:\Program Files (x86)\Python*\python.exe"
     )
-    foreach ($path in $fallbackPaths) {
-        $found = Get-ChildItem $path -ErrorAction SilentlyContinue | Select-Object -First 1
+    foreach ($path in$fallbackPaths) {
+        $found = Get-ChildItem$path -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($found) {
-            $script:PythonCmd = $found.FullName
+            $script:PythonCmd =$found.FullName
             break
         }
     }
 }
 
-if (-not $script:PythonCmd -and -not $SkipPrereqs) {
+if (-not $script:PythonCmd -and -not$SkipPrereqs) {
     Write-Host "[X] Valid Python executable not found. Please restart your computer and run this script again." -ForegroundColor Red
     pause
     exit
 }
 
 # Locate pythonw.exe for silent background execution
-$script:PythonWCmd = $null
-if ($script:PythonCmd) {
-    $derivedW = $script:PythonCmd -replace "(?i)python\.exe$", "pythonw.exe"
+$script:PythonWCmd =$null
+if ($script:PythonCmd) {$derivedW = $script:PythonCmd -replace "(?i)python\.exe$", "pythonw.exe"
     if (Test-Path $derivedW) { 
-        $script:PythonWCmd = $derivedW 
+        $script:PythonWCmd =$derivedW 
     } else { 
-        $script:PythonWCmd = $script:PythonCmd 
+        $script:PythonWCmd =$script:PythonCmd 
     }
 }
 
@@ -237,20 +230,19 @@ if (-not (Test-Path "$script:TargetDir\app.py")) {
     $zipPath = "$env:TEMP\network_dashboard.zip"
     $extractPath = "$env:TEMP\network_dashboard_extract"
 
-    if (-not [string]::IsNullOrWhiteSpace($script:Token)) {
-        $headers = @{
+    if (-not [string]::IsNullOrWhiteSpace($script:Token)) {$headers = @{
             'Authorization' = "token $script:Token"
             'Accept'        = 'application/vnd.github.v3+json'
         }
-        Invoke-WebRequest -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/zipball/$script:Branch" -Headers $headers -OutFile $zipPath
+        Invoke-WebRequest -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/zipball/$script:Branch" -Headers $headers -OutFile$zipPath
     } else {
         Invoke-WebRequest -Uri "https://github.com/$script:RepoOwner/$script:RepoName/archive/refs/heads/$script:Branch.zip" -OutFile $zipPath
     }
     
     Write-Host "[*] Extracting files into $script:TargetDir..." -ForegroundColor Cyan
-    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+    Expand-Archive -Path $zipPath -DestinationPath$extractPath -Force
     
-    $extractedFolder = Get-ChildItem $extractPath | Select-Object -First 1
+    $extractedFolder = Get-ChildItem$extractPath | Select-Object -First 1
     Copy-Item "$($extractedFolder.FullName)\*" $script:TargetDir -Recurse -Force
     
     Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
@@ -264,26 +256,25 @@ if (-not (Test-Path "$script:TargetDir\app.py")) {
         $zipPath = "$env:TEMP\network_dashboard.zip"
         $extractPath = "$env:TEMP\network_dashboard_extract"
 
-        if (-not [string]::IsNullOrWhiteSpace($script:Token)) {
-            $headers = @{
+        if (-not [string]::IsNullOrWhiteSpace($script:Token)) {$headers = @{
                 'Authorization' = "token $script:Token"
                 'Accept'        = 'application/vnd.github.v3+json'
             }
-            Invoke-WebRequest -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/zipball/$script:Branch" -Headers $headers -OutFile $zipPath
+            Invoke-WebRequest -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/zipball/$script:Branch" -Headers $headers -OutFile$zipPath
         } else {
             Invoke-WebRequest -Uri "https://github.com/$script:RepoOwner/$script:RepoName/archive/refs/heads/$script:Branch.zip" -OutFile $zipPath
         }
         
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        Expand-Archive -Path $zipPath -DestinationPath$extractPath -Force
         
-        $extractedFolder = Get-ChildItem $extractPath | Select-Object -First 1
+        $extractedFolder = Get-ChildItem$extractPath | Select-Object -First 1
         
         Get-ChildItem "$($extractedFolder.FullName)" -Recurse | ForEach-Object {
             $relPath = $_.FullName.Substring($extractedFolder.FullName.Length + 1)
             if ($relPath -notin @('webport', 'standalone', 'disablecleanup')) {
-                $destPath = Join-Path $script:TargetDir $relPath
+                $destPath = Join-Path $script:TargetDir$relPath
                 if ($_.PSIsContainer) {
-                    if (-not (Test-Path $destPath)) { New-Item -ItemType Directory -Path $destPath | Out-Null }
+                    if (-not (Test-Path $destPath)) { New-Item -ItemType Directory -Path$destPath | Out-Null }
                 } else {
                     Copy-Item $_.FullName $destPath -Force
                 }
@@ -310,11 +301,11 @@ if (Test-Path "$script:TargetDir\webport") {
 
 $userPort = Read-Host "[?] Enter the port for the Web Dashboard [Default: $currentPort]"
 if ([string]::IsNullOrWhiteSpace($userPort)) {
-    $userPort = $currentPort
+    $userPort =$currentPort
 }
 if ($userPort -notmatch '^\d+$') {
     Write-Host "    [!] Invalid port format. Reverting to $currentPort." -ForegroundColor Yellow
-    $userPort = $currentPort
+    $userPort =$currentPort
 }
 
 Set-Content -Path "$script:TargetDir\webport" -Value $userPort
@@ -339,45 +330,32 @@ if ($isDedicated -match '^[Yy]') {
     Write-Host "    [?] Windows Mobile Hotspot Configuration:" -ForegroundColor Cyan
     try {
         Add-Type -AssemblyName System.Runtime.WindowsRuntime
-        $asTask = ([System.Runtime.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 })[0]
-        $connectionProfile = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()
+        $asTask = ([System.Runtime.WindowsRuntimeSystemExtensions].GetMethods() \vert{} Where-Object {$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 })[0]$connectionProfile = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()
         $tetheringManager = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateForConnectionProfile($connectionProfile)
         
-        $doHotspotSetup = $false
+        $doHotspotSetup =$false
         
-        if ($tetheringManager.TetheringOperationalState -eq 1) {
-            $ans = Read-Host "        [?] Hotspot is ACTIVE. (D)isable, (R)econfigure, or (K)eep? [D/R/K]"
-            if ($ans -match '^[Dd]') {
-                $task = $tetheringManager.StopTetheringAsync()
-                $asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($task)).GetAwaiter().GetResult() | Out-Null
+        if ($tetheringManager.TetheringOperationalState -eq 1) {$ans = Read-Host "        [?] Hotspot is ACTIVE. (D)isable, (R)econfigure, or (K)eep? [D/R/K]"
+            if ($ans -match '^[Dd]') {$task = $tetheringManager.StopTetheringAsync()$asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($task)).GetAwaiter().GetResult() | Out-Null
                 Write-Host "        [✓] Mobile Hotspot disabled." -ForegroundColor Green
-            } elseif ($ans -match '^[Rr]') {
-                $task = $tetheringManager.StopTetheringAsync()
-                $asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($task)).GetAwaiter().GetResult() | Out-Null
-                $doHotspotSetup = $true
+            } elseif ($ans -match '^[Rr]') {$task = $tetheringManager.StopTetheringAsync()$asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($task)).GetAwaiter().GetResult() | Out-Null
+                $doHotspotSetup =$true
             } else {
                 Write-Host "        [*] Keeping existing Hotspot configuration active." -ForegroundColor Gray
             }
         } else {
             $ans = Read-Host "        [?] Hotspot is DISABLED. Do you want to enable/configure it? (y/N)"
             if ($ans -match '^[Yy]') {
-                $doHotspotSetup = $true
+                $doHotspotSetup =$true
             }
         }
 
-        if ($doHotspotSetup) {
-            $ssid = Read-Host "        Enter Hotspot SSID [Default: Network-Dashboard]"
+        if ($doHotspotSetup) {$ssid = Read-Host "        Enter Hotspot SSID [Default: Network-Dashboard]"
             $pass = Read-Host "        Enter Hotspot Password (min 8 chars) [Default: dashboard123]"
             
-            $config = $tetheringManager.GetCurrentConfiguration()
-            $config.Ssid = if ([string]::IsNullOrWhiteSpace($ssid)) { "Network-Dashboard" } else { $ssid }
-            $config.Passphrase = if ([string]::IsNullOrWhiteSpace($pass)) { "dashboard123" } else { $pass }
-            
-            $configTask = $tetheringManager.ConfigureAsync($config)
-            $asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($configTask)).GetAwaiter().GetResult() | Out-Null
-            
-            $startTask = $tetheringManager.StartTetheringAsync()
-            $asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($startTask)).GetAwaiter().GetResult() | Out-Null
+            $config = $tetheringManager.GetCurrentConfiguration()$config.Ssid = if ([string]::IsNullOrWhiteSpace($ssid)) { "Network-Dashboard" } else { $ssid }
+            $config.Passphrase = if ([string]::IsNullOrWhiteSpace($pass)) { "dashboard123" } else { $pass }$configTask = $tetheringManager.ConfigureAsync($config)
+            $asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($configTask)).GetAwaiter().GetResult() \vert{} Out-Null$startTask = $tetheringManager.StartTetheringAsync()$asTask.MakeGenericMethod([Windows.Networking.NetworkOperators.NetworkOperatorTetheringOperationResult]).Invoke($null, @($startTask)).GetAwaiter().GetResult() | Out-Null
             Write-Host "        [✓] Mobile Hotspot successfully configured and enabled!" -ForegroundColor Green
         }
     } catch {
@@ -401,7 +379,7 @@ Write-Host "--------------------------------------------------------" -Foregroun
 Write-Host ""
 Write-Host "--------------------------------------------------------" -ForegroundColor Gray
 
-$icoPath = Join-Path $script:TargetDir 'static\favicon.ico'
+$icoPath = Join-Path$script:TargetDir 'static\favicon.ico'
 $startupLnk = "$OriginalAppData\Microsoft\Windows\Start Menu\Programs\Startup\Network Diagnostics.lnk"
 
 if (Test-Path $startupLnk) {
@@ -425,22 +403,19 @@ if (Test-Path $startupLnk) {
         $ws = New-Object -ComObject WScript.Shell
         $sc = $ws.CreateShortcut($startupLnk)
         
-        if ($startMode -eq '2') {
-            $sc.TargetPath = $script:PythonWCmd
-            $modeMsg = "Invisible Background Process"
+        if ($startMode -eq '2') {$sc.TargetPath = $script:PythonWCmd$modeMsg = "Invisible Background Process"
             
             # --- NEW: Disable browser autostart for headless mode ---
             Set-Content -Path "$script:TargetDir\autostart" -Value "0"
         } else {
-            $sc.TargetPath = $script:PythonCmd
-            $modeMsg = "Visible Terminal Window"
+            $sc.TargetPath = $script:PythonCmd$modeMsg = "Visible Terminal Window"
             
             # --- NEW: Ensure browser autostart is enabled for visible mode ---
             Set-Content -Path "$script:TargetDir\autostart" -Value "1"
         }
         
         $sc.Arguments = "`"$script:TargetDir\setup_env.py`""
-        $sc.WorkingDirectory = $script:TargetDir
+        $sc.WorkingDirectory =$script:TargetDir
         if (Test-Path $icoPath) { 
             $sc.IconLocation = "$icoPath,0" 
         }
@@ -576,7 +551,7 @@ if (-not $SkipPrereqs) {
             $npcapUrl = "https://npcap.com/dist/npcap-1.88.exe"
             $npcapInstaller = "$env:TEMP\npcap_installer.exe"
             
-            Invoke-WebRequest -Uri $npcapUrl -OutFile $npcapInstaller -UseBasicParsing
+            Invoke-WebRequest -Uri $npcapUrl -OutFile$npcapInstaller -UseBasicParsing
             
             Write-Host "    [*] Launching Npcap installer. Please complete the installation window that pops up." -ForegroundColor Yellow
             
