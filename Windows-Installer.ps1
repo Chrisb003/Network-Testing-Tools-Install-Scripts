@@ -46,7 +46,7 @@ $script:RepoOwner = "Chrisb003"
 $script:RepoName  = "Network-Testing-Tools"
 $script:Branch    = "main"
 $script:Token     = ""
-$script:Version   = "1.0.1"
+$script:Version   = "1.0.2"
 
 # Set to TEMP since in-memory scripts do not have a $PSScriptRoot
 Set-Location $env:TEMP
@@ -107,10 +107,6 @@ if (Test-Path "$script:TargetDir\app.py") {
 # ---------------------------------------------------------
 # 4. WELCOME BANNER & INSTALL PROMPT
 # ---------------------------------------------------------
-Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host "   NETWORK DIAGNOSTICS - WINDOWS INSTALLER & MANAGER" -ForegroundColor Cyan
-Write-Host "   Installer Version: $script:Version" -ForegroundColor Yellow
-Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host "This script installs, updates, or manages the Network" -ForegroundColor White
 Write-Host "Diagnostics Dashboard, Python dependencies, and tools." -ForegroundColor White
 Write-Host ""
