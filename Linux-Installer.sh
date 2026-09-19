@@ -39,7 +39,7 @@ SERVICE_NAME="network-dashboard.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
 AUTOSTART_DIR="$HOME/.config/autostart"
 AUTOSTART_FILE="$AUTOSTART_DIR/Network-Diagnostics.desktop"
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 
 # --- 2. EXISTING INSTALLATION CHECK & UNINSTALL OPTION ---
 if [ -d "$TARGET_DIR" ]; then
@@ -272,6 +272,14 @@ case "$is_dedicated" in
             WIFI_IFACE="wlan0"
         fi
 
+        # --- FIX: Ensure Wi-Fi adapter is unblocked and powered on ---
+        echo "        [*] Waking up Wi-Fi adapter ($WIFI_IFACE)..."
+        sudo rfkill unblock all >/dev/null 2>&1
+        sudo ip link set "$WIFI_IFACE" up >/dev/null 2>&1
+        sudo nmcli radio wifi on >/dev/null 2>&1
+        sleep 3 # Give NetworkManager a moment to register the state change
+        # -------------------------------------------------------------
+
         DO_HOTSPOT_SETUP=false
 
         if nmcli connection show "Hotspot" >/dev/null 2>&1; then
@@ -341,7 +349,7 @@ case "$is_dedicated" in
             
             # Bring up the hotspot and explicitly check after a brief network stabilization delay
             sudo nmcli connection up Hotspot >/dev/null 2>&1
-            sleep 4
+            sleep 8 # Increased to allow the Pi extra time to initialize the interface
             
             if nmcli connection show --active | grep -q "Hotspot"; then
                 echo "        [✓] Hotspot successfully activated!"
