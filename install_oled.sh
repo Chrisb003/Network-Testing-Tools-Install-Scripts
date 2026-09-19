@@ -1,9 +1,7 @@
-# This is a test script created to enable a captive portal on the pi hotspot as well as enable and display information on a Waveshare POE HAT (B) screen
-
 #!/bin/bash
 
 echo "=========================================="
-echo " Starting OLED & Captive Portal Setup"
+echo " Starting OLED, Fan & Captive Portal Setup"
 echo "=========================================="
 
 # Get current user and home directory
@@ -16,7 +14,7 @@ sudo raspi-config nonint do_i2c 0
 
 echo ">>> Installing System Dependencies..."
 sudo apt update
-sudo apt install -y swig liblgpio-dev python3-lgpio python3-rpi.gpio python3-venv python3-pip python3-pil i2c-tools lighttpd
+sudo apt install -y swig liblgpio-dev python3-lgpio python3-rpi.gpio python3-venv python3-pip python3-pil i2c-tools lighttpd python3-smbus
 
 echo ">>> Setting up Python Virtual Environment..."
 mkdir -p "$OLED_DIR"
@@ -32,11 +30,21 @@ import subprocess
 import board
 import busio
 import glob
+import smbus
 from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
 
+# Initialize OLED Screen
 i2c = busio.I2C(board.SCL, board.SDA)
 disp = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c)
+
+# Initialize PoE HAT Fan IO Expander (PCF8574 at address 0x20)
+FAN_I2C_ADDR = 0x20
+try:
+bus = smbus.SMBus(1)
+fan_present = True
+except Exception:
+fan_present = False
 
 width = disp.width
 height = disp.height
@@ -111,7 +119,6 @@ try:
 except Exception:
     return False
 
-# Separate timers for hardware (fast) and network (slow)
 last_hw_fetch = 0
 last_net_fetch = 0
 
@@ -126,97 +133,114 @@ pause_time = 2.0
 PAGE_DURATION = 20
 FPS_DELAY = 0.05    
 
+try:
 while True:
-current_time = time.time()
+    current_time = time.time()
+    
+    # Check hardware warnings and control fan every 5 seconds
+    if current_time - last_hw_fetch > 5:
+        temp = get_temp()
+        uv = get_undervoltage()
+        
+        if fan_present:
+            try:
+                if temp >= 55.0:
+                    bus.write_byte(FAN_I2C_ADDR, 0xFE) # Fan ON
+                elif temp < 45.0:
+                    bus.write_byte(FAN_I2C_ADDR, 0xFF) # Fan OFF
+            except Exception:
+                pass
+                
+        last_hw_fetch = current_time
 
-# Check hardware warnings every 5 seconds
-if current_time - last_hw_fetch > 5:
-    temp = get_temp()
-    uv = get_undervoltage()
-    last_hw_fetch = current_time
+    # Check network connections every 20 seconds
+    if current_time - last_net_fetch > 20:
+        networks = get_networks()
+        ap_ssid, ap_psk, ap_has_clients, ap_iface = get_hotspot_details()
+        web_port = get_webport()
+        last_net_fetch = current_time
 
-# Check network connections every 20 seconds
-if current_time - last_net_fetch > 20:
-    networks = get_networks()
-    ap_ssid, ap_psk, ap_has_clients, ap_iface = get_hotspot_details()
-    web_port = get_webport()
-    last_net_fetch = current_time
+    draw.rectangle((0, 0, width, height), outline=0, fill=0)
+    
+    if uv or temp > 75.0:
+        if int(current_time * 2) % 2 == 0:
+            if uv:
+                draw.text((0, 0), "WARNING: VOLT DROP!", font=font, fill=255)
+            if temp > 75.0:
+                draw.text((0, 16), f"WARNING: HOT! {temp}C", font=font, fill=255)
+        disp.image(image)
+        disp.show()
+        time.sleep(FPS_DELAY)
+        continue
+        
+    pages = []
+    network_lines = []
+    
+    for iface, ip in networks:
+        if iface == ap_iface:
+            if ap_has_clients:
+                network_lines.append(f"AP: {ip}:{web_port}")
+        else:
+            network_lines.append(f"{iface}: {ip}")
 
-draw.rectangle((0, 0, width, height), outline=0, fill=0)
-
-if uv or temp > 75.0:
-    if int(current_time * 2) % 2 == 0:
-        if uv:
-            draw.text((0, 0), "WARNING: VOLT DROP!", font=font, fill=255)
-        if temp > 75.0:
-            draw.text((0, 16), f"WARNING: HOT! {temp}C", font=font, fill=255)
+    if network_lines:
+        pages.append("networks")
+    if ap_ssid and ap_psk and not ap_has_clients:
+        pages.append("hotspot")
+        
+    if not pages:
+        draw.text((0, 12), "No Network", font=font, fill=255)
+    else:
+        page_index = int(current_time / PAGE_DURATION) % len(pages)
+        current_page = pages[page_index]
+        
+        if current_page == "networks":
+            y_offset = 0
+            for line in network_lines[:2]:
+                draw.text((0, y_offset), line, font=font, fill=255)
+                y_offset += 16
+            scroll_x = 0 
+            scroll_dir = -1
+            pause_time = 2.0 
+            
+        elif current_page == "hotspot":
+            ap_text = f"AP: {ap_ssid}"
+            try:
+                text_width = int(draw.textlength(ap_text, font=font))
+            except AttributeError:
+                try:
+                    text_width = font.getsize(ap_text)[0]
+                except Exception:
+                    text_width = len(ap_text) * 6
+            
+            if text_width > width:
+                draw.text((scroll_x, 0), ap_text, font=font, fill=255)
+                if pause_time > 0:
+                    pause_time -= FPS_DELAY
+                else:
+                    max_scroll = width - text_width - 12
+                    scroll_x += scroll_dir * 2
+                    if scroll_x <= max_scroll:
+                        scroll_x = max_scroll
+                        scroll_dir = 1
+                        pause_time = 2.0
+                    elif scroll_x >= 0:
+                        scroll_x = 0
+                        scroll_dir = -1
+                        pause_time = 2.0
+            else:
+                draw.text((0, 0), ap_text, font=font, fill=255)
+            draw.text((0, 16), f"PW: {ap_psk}", font=font, fill=255)
+                
     disp.image(image)
     disp.show()
     time.sleep(FPS_DELAY)
-    continue
-    
-pages = []
-network_lines = []
-
-for iface, ip in networks:
-    if iface == ap_iface:
-        if ap_has_clients:
-            network_lines.append(f"AP: {ip}:{web_port}")
-    else:
-        network_lines.append(f"{iface}: {ip}")
-
-if network_lines:
-    pages.append("networks")
-if ap_ssid and ap_psk and not ap_has_clients:
-    pages.append("hotspot")
-    
-if not pages:
-    draw.text((0, 12), "No Network", font=font, fill=255)
-else:
-    page_index = int(current_time / PAGE_DURATION) % len(pages)
-    current_page = pages[page_index]
-    
-    if current_page == "networks":
-        y_offset = 0
-        for line in network_lines[:2]:
-            draw.text((0, y_offset), line, font=font, fill=255)
-            y_offset += 16
-        scroll_x = 0 
-        scroll_dir = -1
-        pause_time = 2.0 
-        
-    elif current_page == "hotspot":
-        ap_text = f"AP: {ap_ssid}"
-        try:
-            text_width = int(draw.textlength(ap_text, font=font))
-        except AttributeError:
-            try:
-                text_width = font.getsize(ap_text)[0]
-            except Exception:
-                text_width = len(ap_text) * 6
-        
-        if text_width > width:
-            draw.text((scroll_x, 0), ap_text, font=font, fill=255)
-            if pause_time > 0:
-                pause_time -= FPS_DELAY
-            else:
-                max_scroll = width - text_width - 12
-                scroll_x += scroll_dir * 2
-                if scroll_x <= max_scroll:
-                    scroll_x = max_scroll
-                    scroll_dir = 1
-                    pause_time = 2.0
-                elif scroll_x >= 0:
-                    scroll_x = 0
-                    scroll_dir = -1
-                    pause_time = 2.0
-        else:
-            draw.text((0, 0), ap_text, font=font, fill=255)
-        draw.text((0, 16), f"PW: {ap_psk}", font=font, fill=255)
-            
-disp.image(image)
-disp.show()
-time.sleep(FPS_DELAY)
+except KeyboardInterrupt:
+if fan_present:
+    try:
+        bus.write_byte(FAN_I2C_ADDR, 0xFF) # Ensure fan turns off if script is stopped
+    except Exception:
+        pass
 EOF
 
 echo ">>> Configuring Lighttpd for Captive Portal..."
@@ -247,7 +271,7 @@ echo "address=/#/10.42.0.1" | sudo tee /etc/NetworkManager/dnsmasq-shared.d/capt
 echo ">>> Creating Systemd Service..."
 cat << EOF | sudo tee /etc/systemd/system/oled_monitor.service > /dev/null
 [Unit]
-Description=OLED Network Monitor
+Description=OLED Network Monitor & Fan Controller
 After=network.target
 
 [Service]
