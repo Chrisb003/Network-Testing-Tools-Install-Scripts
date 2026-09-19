@@ -225,14 +225,17 @@ while True:
     for iface, ip in networks:
         if iface == ap_iface:
             ap_ip = ip
-            network_lines.append(f"AP: {ip}:{web_port}")
+            # Only add the AP IP to the network pages if a client is actually connected
+            if ap_has_clients:
+                network_lines.append(f"AP: {ip}:{web_port}")
         else:
             network_lines.append(f"{iface}: {ip}")
 
     if network_lines:
         pages.append("networks")
         
-    if ap_ssid and ap_psk:
+    # Show the hotspot SSID/PW page when no clients are connected
+    if ap_ssid and ap_psk and not ap_has_clients:
         pages.append("hotspot")
         
     if not pages:
