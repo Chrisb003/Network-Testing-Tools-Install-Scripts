@@ -3,7 +3,7 @@
 # ==================================================
 # OLED Monitor, PoE Fan & Captive Portal Manager
 # ==================================================
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.0.0"
 
 # Request sudo upfront and keep-alive
 sudo -v || { echo "This script requires sudo privileges. Exiting."; exit 1; }
