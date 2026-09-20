@@ -2,9 +2,9 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.4 (Pipe-Safe POSIX)
+# Version: 1.0 (Pipe-Safe POSIX)
 # ==========================================
-VERSION="1.4"
+VERSION="1.0"
 
 # Determine the current user and home directory using standard POSIX commands
 if [ "$(id -u)" -eq 0 ]; then
@@ -26,62 +26,67 @@ PORT_FILE="$APP_DIR/webport"
 DEFAULT_PORT="8080"
 
 # ==========================================
-# UNINSTALLATION LOGIC
+# UPDATE / UNINSTALLATION LOGIC
 # ==========================================
 ALREADY_INSTALLED="no"
-if [ -d "$APP_DIR" ]; then
-    ALREADY_INSTALLED="yes"
-fi
-if [ -f "$SERVICE_FILE" ]; then
+if [ -d "$APP_DIR" ] || [ -f "$SERVICE_FILE" ]; then
     ALREADY_INSTALLED="yes"
 fi
 
 if [ "$ALREADY_INSTALLED" = "yes" ]; then
-    echo "The WiFi Configurator (v$VERSION) appears to be already installed in$APP_DIR."
-    printf "Do you want to uninstall it? (y/N): "
-    # When piped via curl, we MUST read directly from /dev/tty
-    read uninstall_choice < /dev/tty
+    echo "The WiFi Configurator appears to be already installed in $APP_DIR."
+    printf "Do you want to update to the latest version (v$VERSION)? (y/N): "
+    read update_choice < /dev/tty
     
-    case "$uninstall_choice" in
+    case "$update_choice" in
         [Yy]* )
-            echo "Escalating privileges to stop and remove services..."
-            if [ -f "$SERVICE_FILE" ]; then
-                sudo systemctl stop pi-wifi-app
-                sudo systemctl disable pi-wifi-app
-                sudo rm -f "$SERVICE_FILE"
-                sudo systemctl daemon-reload
-            fi
-            
-            echo "Removing application files..."
-            sudo rm -rf "$APP_DIR"
-            
-            echo "Uninstallation complete."
-            exit 0
+            echo "Proceeding with update. Your settings will be preserved..."
             ;;
         * )
-            echo "Exiting without making changes."
+            printf "Do you want to uninstall it? (y/N): "
+            read uninstall_choice < /dev/tty
+            case "$uninstall_choice" in
+                [Yy]* )
+                    echo "Escalating privileges to stop and remove services..."
+                    if [ -f "$SERVICE_FILE" ]; then
+                        sudo systemctl stop pi-wifi-app
+                        sudo systemctl disable pi-wifi-app
+                        sudo rm -f "$SERVICE_FILE"
+                        sudo systemctl daemon-reload
+                    fi
+                    
+                    echo "Removing application files..."
+                    sudo rm -rf "$APP_DIR"
+                    
+                    echo "Uninstallation complete."
+                    exit 0
+                    ;;
+                * )
+                    echo "Exiting without making changes."
+                    exit 0
+                    ;;
+            esac
+            ;;
+    esac
+else
+    echo "Ready to install Pi WiFi Configurator v$VERSION in$APP_DIR."
+    printf "Proceed with installation? (y/N): "
+    read install_choice < /dev/tty
+
+    case "$install_choice" in
+        [Yy]* )
+            # User agreed, continue
+            ;;
+        * )
+            echo "Installation aborted."
             exit 0
             ;;
     esac
 fi
 
 # ==========================================
-# INSTALLATION LOGIC
+# INSTALLATION CORE
 # ==========================================
-echo "Ready to install Pi WiFi Configurator v$VERSION in$APP_DIR."
-printf "Proceed with installation? (y/N): "
-read install_choice < /dev/tty
-
-case "$install_choice" in
-    [Yy]* )
-        # User agreed, continue
-        ;;
-    * )
-        echo "Installation aborted."
-        exit 0
-        ;;
-esac
-
 echo "Escalating privileges to install system dependencies..."
 sudo apt-get update
 sudo apt-get install -y python3-flask network-manager
@@ -89,33 +94,41 @@ sudo apt-get install -y python3-flask network-manager
 echo "Creating application directories..."
 mkdir -p "$APP_DIR/templates"
 
-echo "Creating port configuration file ($PORT_FILE)..."
-echo "$DEFAULT_PORT" > "$PORT_FILE"
+# Only write the default port file if one doesn't already exist
+if [ ! -f "$PORT_FILE" ]; then
+    echo "Creating port configuration file ($PORT_FILE)..."
+    echo "$DEFAULT_PORT" > "$PORT_FILE"
+fi
 
 # ==========================================
 # AUTHENTICATION SETUP
 # ==========================================
-printf "Do you want to enable web authentication? (y/N): "
-read auth_choice < /dev/tty
+# Only ask to set up auth if a user file doesn't already exist
+if [ ! -f "$APP_DIR/user" ]; then
+    printf "Do you want to enable web authentication? (y/N): "
+    read auth_choice < /dev/tty
 
-case "$auth_choice" in
-    [Yy]* )
-        printf "Enter username: "
-        read WEB_USER < /dev/tty
-        
-        printf "Enter password: "
-        # Hide typed text for password using stty on the terminal
-        stty -echo < /dev/tty
-        read WEB_PASS < /dev/tty
-        stty echo < /dev/tty
-        echo ""
-        
-        # Use python to safely generate a secure hash
-        WEB_HASH=$(python3 -c "import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.argv[1]))" "$WEB_PASS")
-        echo "$WEB_USER:$WEB_HASH" > "$APP_DIR/user"
-        echo "Authentication configured."
-        ;;
-esac
+    case "$auth_choice" in
+        [Yy]* )
+            printf "Enter username: "
+            read WEB_USER < /dev/tty
+            
+            printf "Enter password: "
+            # Hide typed text for password using stty on the terminal
+            stty -echo < /dev/tty
+            read WEB_PASS < /dev/tty
+            stty echo < /dev/tty
+            echo ""
+            
+            # Use python to safely generate a secure hash
+            WEB_HASH=$(python3 -c "import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.argv[1]))" "$WEB_PASS")
+            echo "$WEB_USER:$WEB_HASH" > "$APP_DIR/user"
+            echo "Authentication configured."
+            ;;
+    esac
+else
+    echo "Existing authentication settings preserved."
+fi
 
 echo "Writing app.py..."
 cat << 'EOF' > "$APP_DIR/app.py"
@@ -219,19 +232,48 @@ def scan():
 def connect():
     data = request.json
     ssid = data.get('ssid')
-    password = data.get('password')
+    # Intentionally omitted .strip() so valid spaces in passwords are sent intact
+    password = data.get('password', '')
+    autoconnect = data.get('autoconnect', True)
 
-    if not ssid or not password:
-        return jsonify({'status': 'error', 'message': 'SSID and password are required'})
+    if not ssid:
+        return jsonify({'status': 'error', 'message': 'SSID is required'})
 
     try:
-        result = subprocess.run(
-            ['nmcli', 'dev', 'wifi', 'connect', ssid, 'password', password], 
-            capture_output=True, 
-            text=True
-        )
+        cmd = ['nmcli', 'dev', 'wifi', 'connect', ssid]
+        # Only append password argument if one was actually provided
+        if password:
+            cmd.extend(['password', password])
+            
+        # Due to not using shell=True, variables passed in this list are completely isolated
+        # from the shell, entirely preventing command injection attacks.
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
         if result.returncode == 0:
-            return jsonify({'status': 'success', 'message': f'Successfully connected to {ssid}. Network saved!'})
+            # Set the autoconnect property for this profile (works for existing and new profiles)
+            ac_val = 'yes' if autoconnect else 'no'
+            subprocess.run(['nmcli', 'con', 'modify', ssid, 'connection.autoconnect', ac_val])
+            
+            return jsonify({'status': 'success', 'message': f'Successfully connected to {ssid}.'})
+        else:
+            return jsonify({'status': 'error', 'message': result.stderr.strip()})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/disconnect', methods=['POST'])
+def disconnect():
+    try:
+        # Find the active wifi device first
+        res = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,TYPE', 'dev'], capture_output=True, text=True)
+        wifi_dev = 'wlan0' # Fallback
+        for line in res.stdout.splitlines():
+            if 'wifi' in line:
+                wifi_dev = line.split(':')[0]
+                break
+                
+        result = subprocess.run(['nmcli', 'dev', 'disconnect', wifi_dev], capture_output=True, text=True)
+        if result.returncode == 0:
+            return jsonify({'status': 'success', 'message': 'Disconnected from current WiFi.'})
         else:
             return jsonify({'status': 'error', 'message': result.stderr.strip()})
     except Exception as e:
@@ -287,13 +329,20 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
         .primary-btn { background: #e60042; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; font-weight: bold; margin-bottom: 15px; transition: background 0.3s; }
         .primary-btn:hover { background: #bf0037; }
         .primary-btn:disabled { background: #555; color: #888; cursor: not-allowed; }
-        select, input { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 16px; }
+        .secondary-btn { background: #444; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; font-weight: bold; margin-bottom: 15px; transition: background 0.3s; }
+        .secondary-btn:hover { background: #555; }
+        .secondary-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+        body.light-mode .secondary-btn { background: #6c757d; }
+        body.light-mode .secondary-btn:hover { background: #5a6268; }
+        select, input[type="password"], input[type="text"] { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 16px; }
         .hidden { display: none; }
-        #message { padding: 12px; border-radius: 6px; text-align: center; font-size: 14px; }
+        #message { padding: 12px; border-radius: 6px; text-align: center; font-size: 14px; margin-bottom: 15px;}
         .success { background-color: #1e4620; color: #a5d6a7; border: 1px solid #2e7d32; }
         body.light-mode .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .error { background-color: #4a141c; color: #ffb3b8; border: 1px solid #8e0015; }
         body.light-mode .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; }
+        .checkbox-label input { width: auto; margin: 0 10px 0 0; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -313,13 +362,22 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
         </div>
         <h2>WiFi Configurator</h2>
         <button id="scanBtn" class="primary-btn" onclick="scanNetworks()">Search for WiFi Networks</button>
+        
         <div id="connectForm" class="hidden">
             <select id="ssidSelect">
                 <option value="">Select a network...</option>
             </select>
-            <input type="password" id="password" placeholder="WiFi Password">
-            <button id="connectBtn" class="primary-btn" onclick="connectNetwork()">Connect & Save</button>
+            <input type="password" id="password" placeholder="Password (leave empty if known/open)">
+            
+            <label class="checkbox-label">
+                <input type="checkbox" id="autoconnect" checked> Auto-connect in the future
+            </label>
+            
+            <button id="connectBtn" class="primary-btn" onclick="connectNetwork()">Connect</button>
         </div>
+        
+        <button id="disconnectBtn" class="secondary-btn" onclick="disconnectNetwork()">Disconnect Current WiFi</button>
+        
         <div id="message" class="hidden"></div>
     </div>
 
@@ -366,8 +424,10 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             const connectBtn = document.getElementById('connectBtn');
             const ssid = document.getElementById('ssidSelect').value;
             const password = document.getElementById('password').value;
+            const autoconnect = document.getElementById('autoconnect').checked;
+            
             if (!ssid) return showMessage('error', 'Please select a network.');
-            if (!password) return showMessage('error', 'Please enter a password.');
+
             connectBtn.innerText = "Connecting...";
             connectBtn.disabled = true;
             showMessage('', '');
@@ -375,7 +435,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
                 const response = await fetch('/connect', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ssid, password })
+                    body: JSON.stringify({ ssid, password, autoconnect })
                 });
                 const data = await response.json();
                 if (data.status === 'success') {
@@ -387,8 +447,28 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             } catch (err) {
                 showMessage('error', 'Network error occurred while connecting.');
             }
-            connectBtn.innerText = "Connect & Save";
+            connectBtn.innerText = "Connect";
             connectBtn.disabled = false;
+        }
+
+        async function disconnectNetwork() {
+            const btn = document.getElementById('disconnectBtn');
+            btn.innerText = "Disconnecting...";
+            btn.disabled = true;
+            showMessage('', '');
+            try {
+                const response = await fetch('/disconnect', { method: 'POST' });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    showMessage('success', data.message);
+                } else {
+                    showMessage('error', 'Failed: ' + data.message);
+                }
+            } catch (err) {
+                showMessage('error', 'Network error occurred.');
+            }
+            btn.innerText = "Disconnect Current WiFi";
+            btn.disabled = false;
         }
 
         function showMessage(type, text) {
@@ -563,7 +643,7 @@ EOF
 echo "Enabling and starting the service..."
 sudo systemctl daemon-reload
 sudo systemctl enable pi-wifi-app
-sudo systemctl start pi-wifi-app
+sudo systemctl restart pi-wifi-app
 
 echo "==================================================="
 echo "Installation complete!"
