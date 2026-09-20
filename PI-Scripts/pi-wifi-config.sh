@@ -2,9 +2,9 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.0.0 
+# Version: 1.0.0
 # ==========================================
-VERSION="1.0.0"
+VERSION="1.01.0"
 
 # Determine the current user and home directory using standard POSIX commands
 if [ "$(id -u)" -eq 0 ]; then
@@ -979,7 +979,12 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
                 <div class="oled-box" id="oledBoxElem">
                     <div id="oledPreviewText" class="oled-text"></div>
                 </div>
-                <div style="font-size: 12px; color: #888; margin-top: 5px;">(Simulated layout based on active settings)</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px; max-width: 256px; margin-left: auto; margin-right: auto;">
+                    <div style="font-size: 11px; color: #888;">Simulated Layout</div>
+                    <label class="checkbox-label" style="font-size: 11px; margin-bottom: 0; color: #888;">
+                        <input type="checkbox" id="exact_preview_toggle" checked onchange="renderPreview()" style="margin: 0 4px 0 0;"> Exact Rotation
+                    </label>
+                </div>
             </div>
 
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
@@ -1261,7 +1266,11 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
             } else {
                 oledBox.style.background = '#000'; oledBox.style.color = '#fff';
             }
-            oledBox.style.transform = settings.rotate_180 ? 'rotate(180deg)' : 'none';
+            
+            // Check if exact hardware rotation is requested in the preview
+            const exactPreview = document.getElementById('exact_preview_toggle').checked;
+            oledBox.style.transform = (settings.rotate_180 && exactPreview) ? 'rotate(180deg)' : 'none';
+            
             box.style.color = settings.invert_colors ? '#000' : '#fff';
             box.style.opacity = Math.max(0.1, settings.brightness / 255.0);
 
