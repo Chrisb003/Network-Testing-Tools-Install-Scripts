@@ -2,7 +2,7 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.0.0 (OLED Hardware Interval Added)
+# Version: 1.0.0 
 # ==========================================
 VERSION="1.0.0"
 
@@ -167,6 +167,9 @@ def get_oled_dir():
     if os.path.isdir('/root/oled_monitor'): return '/root/oled_monitor'
     return None
 
+# ==========================================
+# STARTUP RESET LOGIC
+# ==========================================
 if os.path.exists(reset_file):
     try:
         if os.path.exists(user_file): os.remove(user_file)
@@ -176,7 +179,7 @@ if os.path.exists(reset_file):
         print(f"Startup: Error resetting user: {e}")
 
 def get_credentials():
-    """Retrieves the username and hashed password from the user file."""
+    """Retrieves the currently saved username and hashed password from the user file."""
     if os.path.exists(user_file):
         with open(user_file, 'r') as f:
             content = f.read().strip()
@@ -184,7 +187,7 @@ def get_credentials():
     return None, None
 
 def get_current_port():
-    """Retrieves the current configured port from the webport file."""
+    """Reads the active webport file to determine which port the app should bind to."""
     try:
         if os.path.exists(port_file_path):
             with open(port_file_path, 'r') as f:
@@ -194,7 +197,11 @@ def get_current_port():
     return 8080
 
 def get_interfaces_info():
-    """Detects active network interfaces and identifies hotspots."""
+    """
+    Uses nmcli to detect all active network interfaces and identifies if any 
+    of them are currently broadcasting a Hotspot (Access Point mode).
+    Returns a list of interfaces and a safe default interface.
+    """
     try:
         res = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'dev'], capture_output=True, text=True)
         interfaces = []
@@ -210,6 +217,7 @@ def get_interfaces_info():
                     if mode_res.stdout.strip() == 'ap': is_hotspot = True
                 interfaces.append({'name': dev, 'is_hotspot': is_hotspot})
         
+        # Pick a default interface that is not a hotspot
         for iface in interfaces:
             if not iface['is_hotspot']:
                 default_iface = iface['name']
@@ -221,9 +229,10 @@ def get_interfaces_info():
         return {'interfaces': [], 'default': ''}
 
 def get_hotspot_policy():
-    """Reads the saved policy on whether the hotspot should persist on boot."""
+    """Reads the user's saved policy on whether Hotspots should persist on boot with high priority."""
     if os.path.exists(hotspot_policy_file):
         with open(hotspot_policy_file, 'r') as f: return f.read().strip() == 'true'
+    # Default to true if currently running
     info = get_interfaces_info()
     for iface in info['interfaces']:
         if iface['is_hotspot']:
@@ -232,7 +241,7 @@ def get_hotspot_policy():
     return False
 
 def set_hotspot_priority(priority):
-    """Modifies NetworkManager profiles to apply the chosen hotspot priority."""
+    """Modifies NetworkManager profiles to apply the chosen hotspot autoconnect priority."""
     res = subprocess.run(['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show'], capture_output=True, text=True)
     for line in res.stdout.splitlines():
         if '802-11-wireless' in line:
@@ -243,14 +252,14 @@ def set_hotspot_priority(priority):
 
 @app.before_request
 def check_auth():
-    """Validates login status before allowing access to private routes."""
+    """Middleware: Validates login status before allowing access to private application routes."""
     if os.path.exists(user_file):
         if request.endpoint not in ['login', 'static'] and not session.get('logged_in'):
             return redirect(url_for('login'))
 
 @app.context_processor
 def inject_global_vars():
-    """Injects globally accessible variables into templates."""
+    """Injects globally accessible state variables into all Jinja2 templates."""
     return {
         'auth_enabled': os.path.exists(user_file),
         'oled_installed': get_oled_dir() is not None,
@@ -259,10 +268,12 @@ def inject_global_vars():
 
 @app.route('/')
 def index():
+    """Renders the main WiFi Configuration dashboard."""
     return render_template('index.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    """Handles user authentication. Validates credentials and sets the permanent secure session cookie."""
     if request.method == 'POST':
         user = request.form.get('username')
         pw = request.form.get('password')
@@ -276,17 +287,21 @@ def login():
 
 @app.route('/logout')
 def logout():
+    """Destroys the current user session and redirects to the login screen."""
     session.pop('logged_in', None)
     return redirect(url_for('login'))
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
+    """Handles the Web Application Settings: updates Hotspot policies, Auth credentials, and Port bindings."""
     if request.method == 'POST':
+        # Save Hotspot Policy
         force_hs = request.form.get('force_hotspot') == 'on'
         with open(hotspot_policy_file, 'w') as f:
             f.write('true' if force_hs else 'false')
         set_hotspot_priority(100 if force_hs else 0)
         
+        # Process User Credentials
         new_user = request.form.get('username')
         new_pw = request.form.get('password')
         if new_user and new_pw:
@@ -295,6 +310,7 @@ def settings():
             session.permanent = True
             session['logged_in'] = True
             
+        # Process Port Change
         new_port_str = request.form.get('port')
         port_changed_to = None
         if new_port_str and new_port_str.isdigit():
@@ -306,6 +322,7 @@ def settings():
                 subprocess.Popen(['/bin/sh', '-c', 'sleep 1.5 && systemctl restart pi-wifi-app.service'])
                 port_changed_to = new_port
                 
+        # Handle Redirection if port was changed
         if port_changed_to:
             return f"""
             <html>
@@ -329,7 +346,7 @@ def settings():
 # ==========================================
 @app.route('/api/system/temp', methods=['GET'])
 def system_temp():
-    """Returns the current internal hardware temperature of the Raspberry Pi."""
+    """Returns the current internal hardware CPU temperature of the Raspberry Pi."""
     try:
         out = subprocess.check_output(['vcgencmd', 'measure_temp'], stderr=subprocess.DEVNULL).decode('utf-8')
         temp = float(out.replace('temp=', '').replace('\'C\n', ''))
@@ -339,6 +356,7 @@ def system_temp():
 
 @app.route('/oled')
 def oled_page():
+    """Renders the OLED Configuration UI, dynamically loading settings.json from the oled_monitor directory."""
     oled_dir = get_oled_dir()
     if not oled_dir: return "OLED Monitor is not installed on this system.", 404
     
@@ -358,6 +376,7 @@ def oled_page():
 
 @app.route('/api/oled/save', methods=['POST'])
 def oled_save():
+    """API Endpoint: Receives JSON data from the UI, validates it, overwrites settings.json, and restarts the OLED service."""
     oled_dir = get_oled_dir()
     if not oled_dir: return jsonify({"status":"error", "message":"OLED not installed"})
     
@@ -376,6 +395,7 @@ def oled_save():
 
 @app.route('/api/oled/reset', methods=['POST'])
 def oled_reset():
+    """API Endpoint: Triggers a factory reset of the OLED settings by creating a physical 'reset' file."""
     oled_dir = get_oled_dir()
     if not oled_dir: return jsonify({"status":"error", "message":"OLED not installed"})
     try:
@@ -390,10 +410,12 @@ def oled_reset():
 # ==========================================
 @app.route('/interfaces', methods=['GET'])
 def interfaces():
+    """API Endpoint: Returns JSON metadata about available network interfaces."""
     return jsonify(get_interfaces_info())
 
 @app.route('/scan', methods=['GET'])
 def scan():
+    """API Endpoint: Executes an nmcli WiFi scan on the requested network adapter and returns a list of SSIDs."""
     try:
         device = request.args.get('device')
         cmd = ['nmcli', '-t', '-f', 'SSID,SIGNAL', 'dev', 'wifi']
@@ -416,6 +438,7 @@ def scan():
 
 @app.route('/connect', methods=['POST'])
 def connect():
+    """API Endpoint: Executes nmcli to connect to a specific SSID. Applies autoconnect policies after success."""
     data = request.json
     ssid = data.get('ssid')
     password = data.get('password', '')
@@ -440,6 +463,7 @@ def connect():
 
 @app.route('/disconnect', methods=['POST'])
 def disconnect():
+    """API Endpoint: Gracefully disconnects the specified network adapter from its current connection."""
     try:
         device = request.json.get('device', 'wlan0')
         result = subprocess.run(['nmcli', 'dev', 'disconnect', device], capture_output=True, text=True)
@@ -448,7 +472,7 @@ def disconnect():
     except Exception as e: return jsonify({'status': 'error', 'message': str(e)})
 
 def can_bind_port(check_port):
-    """Safely checks if the requested port is available for binding."""
+    """Safely checks if a requested port is available for binding by the Flask application."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(('0.0.0.0', check_port))
@@ -468,7 +492,6 @@ if __name__ == '__main__':
                 if p.isdigit(): bak_port = int(p)
     except: pass
 
-    # Smart Port Fallback Mechanism
     if not can_bind_port(port):
         print(f"Port {port} is in use or unavailable. Falling back to {bak_port}...")
         port = bak_port
@@ -557,6 +580,8 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
 
     <script>
         let interfacesData = [];
+        
+        // Toggles the interface between dark and light themes, saving preference in localStorage
         function toggleTheme() {
             const isLight = document.body.classList.toggle('light-mode');
             localStorage.setItem('theme', isLight ? 'light' : 'dark');
@@ -564,6 +589,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
         }
         document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
 
+        // Fetches available network interfaces from the backend to populate the interface selector
         async function loadInterfaces() {
             try {
                 const res = await fetch('/interfaces');
@@ -584,6 +610,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             } catch (err) {}
         }
 
+        // Checks if the selected interface is running a hotspot and displays a warning to the user
         function checkWarning() {
             const selected = document.getElementById('interfaceSelect').value;
             const iface = interfacesData.find(i => i.name === selected);
@@ -592,6 +619,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             else warning.classList.add('hidden');
         }
 
+        // Triggers a network scan via the backend and updates the SSID dropdown list
         async function scanNetworks() {
             const scanBtn = document.getElementById('scanBtn');
             const connectForm = document.getElementById('connectForm');
@@ -617,6 +645,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             scanBtn.disabled = false;
         }
 
+        // Packages user input and posts connection request to the backend API
         async function connectNetwork() {
             const connectBtn = document.getElementById('connectBtn');
             const ssid = document.getElementById('ssidSelect').value;
@@ -637,6 +666,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             connectBtn.innerText = "Connect"; connectBtn.disabled = false;
         }
 
+        // Sends a disconnect request for the selected interface to the backend API
         async function disconnectNetwork() {
             const btn = document.getElementById('disconnectBtn');
             const device = document.getElementById('interfaceSelect').value;
@@ -650,376 +680,15 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             btn.innerText = "Disconnect Current WiFi"; btn.disabled = false;
         }
 
+        // Utility function to inject status messages (success/error) into the DOM briefly
         function showMessage(type, text) {
             const msgDiv = document.getElementById('message');
             if (!text) { msgDiv.className = 'hidden'; return; }
             msgDiv.innerText = text; msgDiv.className = type;
         }
+        
+        // Execute UI initialization on load
         window.onload = loadInterfaces;
-    </script>
-</body>
-</html>
-EOF
-
-echo "Writing templates/oled.html..."
-cat << 'EOF' > "$APP_DIR/templates/oled.html"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OLED Display Configurator</title>
-    <style>
-        :root { --bg-color: #121212; --container-bg: #1e1e1e; --text-color: #ffffff; --input-bg: #2d2d2d; --input-border: #444; --link-color: #ff4d79; --card-bg: #2a2a2a; }
-        body.light-mode { --bg-color: #f0f2f5; --container-bg: #ffffff; --text-color: #333333; --input-bg: #ffffff; --input-border: #ddd; --link-color: #e60042; --card-bg: #f8f9fa; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; transition: 0.3s; }
-        .top-bar { display: flex; justify-content: space-between; align-items: center; max-width: 900px; margin: 0 auto 20px; font-size: 14px; }
-        .top-bar a { color: var(--link-color); text-decoration: none; font-weight: bold; }
-        .theme-toggle { background: transparent; color: var(--text-color); border: 1px solid var(--input-border); padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; margin: 0 auto; align-items: start;}
-        @media(max-width: 768px){ .grid { grid-template-columns: 1fr; } }
-        .panel { background: var(--container-bg); padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
-        h2, h3 { margin-top: 0; }
-        label { display: block; font-size: 13px; font-weight: bold; margin-bottom: 5px; color: var(--link-color);}
-        input, select, textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 14px; font-family: inherit;}
-        textarea { resize: vertical; min-height: 80px; }
-        .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; font-weight: normal; color: var(--text-color);}
-        .checkbox-label input { width: auto; margin: 0 10px 0 0; }
-        
-        .preview-container { text-align: center; margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid var(--input-border); }
-        .oled-box { width: 256px; height: 64px; background: #000; margin: 0 auto; border: 4px solid #333; border-radius: 4px; padding: 4px; box-sizing: border-box; position: relative; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.5);}
-        .oled-text { color: #fff; font-family: 'Courier New', Courier, monospace; font-size: 14px; line-height: 14px; white-space: pre; position: absolute; top: 4px; left: 4px;}
-        
-        .page-card { background: var(--card-bg); border: 1px solid var(--input-border); padding: 15px; border-radius: 6px; margin-bottom: 15px; position: relative; }
-        .page-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-        .page-card-header strong { font-size: 14px; }
-        .btn { background: #444; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; transition: 0.3s; }
-        .btn:hover { background: #555; }
-        .btn-primary { background: #e60042; }
-        .btn-primary:hover { background: #bf0037; }
-        .btn-danger { background: transparent; color: #ff4d4d; border: 1px solid #ff4d4d; padding: 4px 8px; font-size: 12px;}
-        .btn-danger:hover { background: #ff4d4d; color: white; }
-        .flex-row { display: flex; gap: 10px; }
-        .flex-row > div { flex: 1; }
-        
-        #message { text-align: center; padding: 10px; border-radius: 6px; font-weight: bold; display: none; margin-bottom: 20px;}
-        .success { background-color: #1e4620; color: #a5d6a7; }
-        body.light-mode .success { background-color: #d4edda; color: #155724; }
-        .error { background-color: #4a141c; color: #ffb3b8; }
-        body.light-mode .error { background-color: #f8d7da; color: #721c24; }
-
-        .live-badge { float: right; font-size: 11px; font-weight: normal; padding: 2px 6px; background: var(--input-bg); border-radius: 4px; color: var(--text-color); border: 1px solid var(--input-border);}
-    </style>
-</head>
-<body>
-    <script>if (localStorage.getItem('theme') === 'light') document.body.classList.add('light-mode');</script>
-    
-    <div class="top-bar">
-        <div>OLED Display Manager</div>
-        <div>
-            <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()">☀️ Light</button>
-            <a href="/">Back to WiFi Config</a>
-        </div>
-    </div>
-
-    <div class="grid">
-        <!-- Global Settings Panel -->
-        <div class="panel">
-            <h2>Hardware & Global Settings</h2>
-            
-            <div class="flex-row">
-                <div>
-                    <label>Fan Turn ON Temp (°C) <span id="liveTemp" class="live-badge">Pi: --.-°C</span></label>
-                    <input type="number" id="fan_on" step="0.5">
-                </div>
-                <div>
-                    <label>Fan Turn OFF Temp (°C)</label>
-                    <input type="number" id="fan_off" step="0.5">
-                </div>
-            </div>
-            
-            <label class="checkbox-label">
-                <input type="checkbox" id="show_warnings"> Show flashing Temp/Voltage warnings
-            </label>
-            <label>Warning Trigger Temp (°C)</label>
-            <input type="number" id="warn_temp" step="0.5">
-            
-            <hr style="border: 0; border-top: 1px solid var(--input-border); margin: 20px 0;">
-            
-            <div class="flex-row">
-                <div>
-                    <label>Default Page Duration (sec)</label>
-                    <input type="number" id="global_dur" step="1">
-                </div>
-                <div>
-                    <label>Network Scan Interval (sec)</label>
-                    <input type="number" id="net_interval" step="1">
-                </div>
-            </div>
-
-            <div class="flex-row">
-                <div>
-                    <label>Hardware Scan Interval (sec)</label>
-                    <input type="number" id="hw_interval" step="1">
-                </div>
-                <div></div>
-            </div>
-            
-            <button class="btn btn-primary" style="width: 100%; margin-top: 10px;" onclick="saveConfig()">💾 Save & Apply to OLED</button>
-            <button class="btn" style="width: 100%; margin-top: 10px; border: 1px solid #888;" onclick="resetConfig()">⚠️ Factory Reset Config</button>
-            <div id="message" style="margin-top: 15px;"></div>
-        </div>
-
-        <!-- Pages Configuration Panel -->
-        <div class="panel">
-            <div class="preview-container">
-                <h3>OLED Live Preview</h3>
-                <div class="oled-box">
-                    <div id="oledPreviewText" class="oled-text"></div>
-                </div>
-                <div style="font-size: 12px; color: #888; margin-top: 5px;">(Simulated layout based on active settings)</div>
-            </div>
-
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                <h3 style="margin: 0;">Screen Pages</h3>
-                <button class="btn" onclick="addPage()">+ Add Page</button>
-            </div>
-            
-            <div id="pagesContainer"></div>
-        </div>
-    </div>
-
-    <script>
-        let settings = {};
-        try {
-            settings = JSON.parse('{{ current_settings|safe }}');
-        } catch(e) {
-            settings = { fan_on_temp: 55, fan_off_temp: 45, show_warnings: true, warning_temp: 75, page_duration_seconds: 20, network_update_interval_seconds: 20, hardware_update_interval_seconds: 5, pages: [] };
-        }
-
-        function toggleTheme() {
-            const isLight = document.body.classList.toggle('light-mode');
-            localStorage.setItem('theme', isLight ? 'light' : 'dark');
-            document.getElementById('themeToggle').innerText = isLight ? '🌙 Dark' : '☀️ Light';
-        }
-        document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
-
-        async function fetchLiveTemp() {
-            try {
-                const res = await fetch('/api/system/temp');
-                const data = await res.json();
-                if(data.temp !== undefined) {
-                    document.getElementById('liveTemp').innerText = `Pi: ${data.temp.toFixed(1)}°C`;
-                }
-            } catch(e) {}
-        }
-
-        function initForm() {
-            document.getElementById('fan_on').value = settings.fan_on_temp || 55;
-            document.getElementById('fan_off').value = settings.fan_off_temp || 45;
-            document.getElementById('show_warnings').checked = settings.show_warnings !== false;
-            document.getElementById('warn_temp').value = settings.warning_temp || 75;
-            document.getElementById('global_dur').value = settings.page_duration_seconds || 20;
-            document.getElementById('net_interval').value = settings.network_update_interval_seconds || 20;
-            document.getElementById('hw_interval').value = settings.hardware_update_interval_seconds || 5;
-            
-            renderPages();
-            
-            document.getElementById('pagesContainer').addEventListener('input', renderPreview);
-            
-            // Start checking live temp
-            fetchLiveTemp();
-            setInterval(fetchLiveTemp, 5000);
-        }
-
-        function renderPages() {
-            const container = document.getElementById('pagesContainer');
-            container.innerHTML = '';
-            
-            if(!settings.pages || settings.pages.length === 0) {
-                container.innerHTML = '<div style="text-align:center; color:#888; font-size:14px; padding:20px;">No pages configured. Click Add Page.</div>';
-            }
-
-            (settings.pages || []).forEach((page, index) => {
-                const card = document.createElement('div');
-                card.className = 'page-card';
-                
-                let specifics = '';
-                if(page.type === 'custom') {
-                    const linesText = (page.lines || []).join('\n');
-                    specifics = `
-                        <label>Custom Lines (variables: {time}, {temp}, {wifi_ssid}, {ap_ip})</label>
-                        <textarea id="page_lines_${index}">${linesText}</textarea>
-                    `;
-                } else if(page.type === 'network_list') {
-                    specifics = `
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="page_apip_${index}" ${page.show_ap_ip_when_connected !== false ? 'checked' : ''}> Show Hotspot IP when clients connect
-                        </label>
-                    `;
-                } else if(page.type === 'hotspot_details') {
-                    specifics = `
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="page_hide_${index}" ${page.hide_when_connected !== false ? 'checked' : ''}> Auto-hide this screen when a device connects
-                        </label>
-                    `;
-                }
-
-                card.innerHTML = `
-                    <div class="page-card-header">
-                        <strong>Page ${index + 1}</strong>
-                        <button class="btn-danger" onclick="deletePage(${index})">Remove</button>
-                    </div>
-                    
-                    <div class="flex-row">
-                        <div>
-                            <label>Page Type</label>
-                            <select id="page_type_${index}" onchange="updatePageType(${index}, this.value)">
-                                <option value="network_list" ${page.type === 'network_list' ? 'selected' : ''}>Network IPs</option>
-                                <option value="hotspot_details" ${page.type === 'hotspot_details' ? 'selected' : ''}>Hotspot Details</option>
-                                <option value="custom" ${page.type === 'custom' ? 'selected' : ''}>Custom Text</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Duration (0 to disable)</label>
-                            <input type="number" id="page_dur_${index}" value="${page.duration !== undefined ? page.duration : 20}">
-                        </div>
-                    </div>
-                    
-                    <div class="flex-row">
-                        <div>
-                            <label>Text Alignment</label>
-                            <select id="page_align_${index}">
-                                <option value="left" ${page.align === 'left' ? 'selected' : ''}>Left</option>
-                                <option value="center" ${page.align === 'center' ? 'selected' : ''}>Center</option>
-                                <option value="right" ${page.align === 'right' ? 'selected' : ''}>Right</option>
-                            </select>
-                        </div>
-                    </div>
-                    ${specifics}
-                `;
-                container.appendChild(card);
-            });
-            renderPreview();
-        }
-
-        function updatePageType(index, newType) {
-            syncStateFromUI();
-            settings.pages[index].type = newType;
-            if(newType === 'custom' && !settings.pages[index].lines) settings.pages[index].lines = ['Time: {time}', 'Temp: {temp}C'];
-            renderPages();
-        }
-
-        function addPage() {
-            syncStateFromUI();
-            if(!settings.pages) settings.pages = [];
-            settings.pages.push({ type: 'custom', duration: 20, align: 'left', lines: ['New Custom Page'] });
-            renderPages();
-        }
-
-        function deletePage(index) {
-            syncStateFromUI();
-            settings.pages.splice(index, 1);
-            renderPages();
-        }
-
-        function syncStateFromUI() {
-            settings.fan_on_temp = parseFloat(document.getElementById('fan_on').value);
-            settings.fan_off_temp = parseFloat(document.getElementById('fan_off').value);
-            settings.show_warnings = document.getElementById('show_warnings').checked;
-            settings.warning_temp = parseFloat(document.getElementById('warn_temp').value);
-            settings.page_duration_seconds = parseInt(document.getElementById('global_dur').value);
-            settings.network_update_interval_seconds = parseInt(document.getElementById('net_interval').value);
-            settings.hardware_update_interval_seconds = parseInt(document.getElementById('hw_interval').value);
-            
-            (settings.pages || []).forEach((page, i) => {
-                const typeSel = document.getElementById(`page_type_${i}`);
-                if(!typeSel) return;
-                page.type = typeSel.value;
-                page.duration = parseInt(document.getElementById(`page_dur_${i}`).value);
-                page.align = document.getElementById(`page_align_${i}`).value;
-                
-                if(page.type === 'custom') {
-                    page.lines = document.getElementById(`page_lines_${i}`).value.split('\n');
-                } else if(page.type === 'network_list') {
-                    page.show_ap_ip_when_connected = document.getElementById(`page_apip_${i}`).checked;
-                } else if(page.type === 'hotspot_details') {
-                    page.hide_when_connected = document.getElementById(`page_hide_${i}`).checked;
-                }
-            });
-        }
-
-        function renderPreview() {
-            syncStateFromUI();
-            const box = document.getElementById('oledPreviewText');
-            
-            let p = null;
-            for(let page of (settings.pages || [])) {
-                if(page.duration > 0) { p = page; break; }
-            }
-            
-            if(!p) {
-                box.innerHTML = '<div style="text-align:center; padding-top:10px;">No Active Pages</div>';
-                return;
-            }
-
-            let lines = [];
-            if(p.type === 'network_list') {
-                lines = ['wlan0: 192.168.1.10:80', 'eth0: 10.0.0.5:80'];
-            } else if(p.type === 'hotspot_details') {
-                lines = ['Pi: My_Hotspot', 'PW: Password123', 'IP: 10.42.0.1:80'];
-            } else if(p.type === 'custom') {
-                const curTempStr = document.getElementById('liveTemp').innerText.replace('Pi: ', '');
-                lines = (p.lines || []).map(l => l
-                    .replace('{time}', '14:30:00').replace('{temp}', curTempStr !== '--.-°C' ? curTempStr.replace('°C','') : '48.5')
-                    .replace('{wifi_ssid}', 'HomeNetwork').replace('{ap_ip}', '10.42.0.1')
-                    .replace('{ap_ssid}', 'Pi_Hotspot').replace('{date}', '2026-09-20')
-                );
-            }
-
-            box.style.textAlign = p.align === 'center' ? 'center' : (p.align === 'right' ? 'right' : 'left');
-            box.style.width = '100%';
-            box.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
-        }
-
-        function showMessage(type, text) {
-            const m = document.getElementById('message');
-            m.className = type;
-            m.innerText = text;
-            m.style.display = 'block';
-            setTimeout(() => m.style.display = 'none', 4000);
-        }
-
-        async function saveConfig() {
-            syncStateFromUI();
-            showMessage('success', 'Saving and restarting OLED...');
-            try {
-                const res = await fetch('/api/oled/save', {
-                    method: 'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify(settings)
-                });
-                const data = await res.json();
-                showMessage(data.status, data.message);
-            } catch(e) {
-                showMessage('error', 'Network error.');
-            }
-        }
-
-        async function resetConfig() {
-            if(!confirm("Are you sure you want to completely reset the OLED settings?")) return;
-            showMessage('success', 'Sending reset command...');
-            try {
-                const res = await fetch('/api/oled/reset', { method: 'POST' });
-                const data = await res.json();
-                showMessage(data.status, data.message);
-                if(data.status === 'success') setTimeout(() => window.location.reload(), 1500);
-            } catch(e) {
-                showMessage('error', 'Network error.');
-            }
-        }
-
-        window.onload = initForm;
     </script>
 </body>
 </html>
@@ -1061,6 +730,7 @@ cat << 'EOF' > "$APP_DIR/templates/login.html"
         </form>
     </div>
     <script>
+        // Toggles the interface between dark and light themes, saving preference in localStorage
         function toggleTheme() {
             const isLight = document.body.classList.toggle('light-mode');
             localStorage.setItem('theme', isLight ? 'light' : 'dark');
@@ -1130,12 +800,565 @@ cat << 'EOF' > "$APP_DIR/templates/settings.html"
         <a href="/" class="back-link">Cancel and return Home</a>
     </div>
     <script>
+        // Toggles the interface between dark and light themes, saving preference in localStorage
         function toggleTheme() {
             const isLight = document.body.classList.toggle('light-mode');
             localStorage.setItem('theme', isLight ? 'light' : 'dark');
             document.getElementById('themeToggle').innerText = isLight ? '🌙 Dark' : '☀️ Light';
         }
         document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
+    </script>
+</body>
+</html>
+EOF
+
+echo "Writing templates/oled.html..."
+cat << 'EOF' > "$APP_DIR/templates/oled.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OLED Display Configurator</title>
+    <style>
+        :root { --bg-color: #121212; --container-bg: #1e1e1e; --text-color: #ffffff; --input-bg: #2d2d2d; --input-border: #444; --link-color: #ff4d79; --card-bg: #2a2a2a; }
+        body.light-mode { --bg-color: #f0f2f5; --container-bg: #ffffff; --text-color: #333333; --input-bg: #ffffff; --input-border: #ddd; --link-color: #e60042; --card-bg: #f8f9fa; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; transition: 0.3s; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; max-width: 900px; margin: 0 auto 20px; font-size: 14px; }
+        .top-bar a { color: var(--link-color); text-decoration: none; font-weight: bold; }
+        .theme-toggle { background: transparent; color: var(--text-color); border: 1px solid var(--input-border); padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; margin: 0 auto; align-items: start;}
+        @media(max-width: 768px){ .grid { grid-template-columns: 1fr; } }
+        .panel { background: var(--container-bg); padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        h2, h3 { margin-top: 0; }
+        label { display: block; font-size: 13px; font-weight: bold; margin-bottom: 5px; color: var(--link-color);}
+        input[type="number"], input[type="time"], select, textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 14px; font-family: inherit;}
+        input[type="range"] { width: 100%; margin-bottom: 15px; }
+        textarea { resize: vertical; min-height: 80px; }
+        .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; font-weight: normal; color: var(--text-color);}
+        .checkbox-label input { width: auto; margin: 0 10px 0 0; }
+        
+        .preview-container { text-align: center; margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid var(--input-border); }
+        .oled-box { width: 256px; height: 64px; background: #000; margin: 0 auto; border: 4px solid #333; border-radius: 4px; padding: 4px; box-sizing: border-box; position: relative; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.5); transition: background 0.3s, transform 0.3s;}
+        .oled-text { color: #fff; font-family: 'Courier New', Courier, monospace; font-size: 14px; line-height: 14px; white-space: pre; position: absolute; top: 4px; left: 4px; transition: color 0.3s, opacity 0.3s;}
+        
+        .page-card { background: var(--card-bg); border: 1px solid var(--input-border); padding: 15px; border-radius: 6px; margin-bottom: 15px; position: relative; }
+        .page-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .page-card-header strong { font-size: 14px; }
+        .btn { background: #444; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; transition: 0.3s; }
+        .btn:hover { background: #555; }
+        .btn-primary { background: #e60042; }
+        .btn-primary:hover { background: #bf0037; }
+        .btn-danger { background: transparent; color: #ff4d4d; border: 1px solid #ff4d4d; padding: 4px 8px; font-size: 12px;}
+        .btn-danger:hover { background: #ff4d4d; color: white; }
+        .flex-row { display: flex; gap: 10px; }
+        .flex-row > div { flex: 1; }
+        
+        #message { text-align: center; padding: 10px; border-radius: 6px; font-weight: bold; display: none; margin-bottom: 20px;}
+        .success { background-color: #1e4620; color: #a5d6a7; }
+        body.light-mode .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #4a141c; color: #ffb3b8; }
+        body.light-mode .error { background-color: #f8d7da; color: #721c24; }
+
+        .live-badge { font-size: 13px; font-weight: bold; padding: 4px 8px; background: #e60042; border-radius: 4px; color: white;}
+    </style>
+</head>
+<body>
+    <script>if (localStorage.getItem('theme') === 'light') document.body.classList.add('light-mode');</script>
+    
+    <div class="top-bar">
+        <div>OLED Display Manager</div>
+        <div>
+            <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()">☀️ Light</button>
+            <a href="/">Back to WiFi Config</a>
+        </div>
+    </div>
+
+    <div class="grid">
+        <!-- Global Settings Panel -->
+        <div class="panel">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0;">Global Settings</h2>
+                <span id="liveTemp" class="live-badge">Pi: --.-°C</span>
+            </div>
+            
+            <!-- FAN CONTROL -->
+            <h3 style="margin-top: 15px; margin-bottom: 10px; font-size: 15px; color: var(--text-color);">Fan Control</h3>
+            <label class="checkbox-label">
+                <input type="checkbox" id="enable_fan"> Enable PoE Fan automatic control
+            </label>
+            <div class="flex-row">
+                <div>
+                    <label>Turn ON Temp (°C)</label>
+                    <input type="number" id="fan_on" step="0.5">
+                </div>
+                <div>
+                    <label>Turn OFF Temp (°C)</label>
+                    <input type="number" id="fan_off" step="0.5">
+                </div>
+            </div>
+            <label>Minimum Fan Run Time (sec, anti-flutter)</label>
+            <input type="number" id="fan_min_run" step="1">
+
+            <!-- DISPLAY SETTINGS -->
+            <h3 style="margin-top: 15px; margin-bottom: 10px; font-size: 15px; color: var(--text-color);">OLED Display & Warnings</h3>
+            <label class="checkbox-label">
+                <input type="checkbox" id="enable_screen"> Enable OLED screen
+            </label>
+            
+            <label>Brightness: <span id="brightness_val" style="color: var(--text-color); font-weight:normal;">255</span></label>
+            <input type="range" id="brightness" min="0" max="255">
+
+            <div class="flex-row">
+                <div>
+                    <label class="checkbox-label"><input type="checkbox" id="rotate_180"> Rotate 180°</label>
+                </div>
+                <div>
+                    <label class="checkbox-label"><input type="checkbox" id="invert_colors"> Invert Colors</label>
+                </div>
+            </div>
+            
+            <label class="checkbox-label">
+                <input type="checkbox" id="pixel_shift"> Enable Pixel Shift Screensaver (Anti-burn-in)
+            </label>
+
+            <label class="checkbox-label" style="margin-top: 10px;">
+                <input type="checkbox" id="show_warnings"> Show flashing Temp/Voltage warnings
+            </label>
+            <label>Warning Trigger Temp (°C)</label>
+            <input type="number" id="warn_temp" step="0.5">
+            
+            <!-- QUIET HOURS -->
+            <h3 style="margin-top: 15px; margin-bottom: 10px; font-size: 15px; color: var(--text-color);">Quiet Hours (Night Mode)</h3>
+            <label class="checkbox-label">
+                <input type="checkbox" id="quiet_enabled"> Enable Quiet Hours (Disables Screen & Fan)
+            </label>
+            <div class="flex-row">
+                <div>
+                    <label>Start Time</label>
+                    <input type="time" id="quiet_start">
+                </div>
+                <div>
+                    <label>End Time</label>
+                    <input type="time" id="quiet_end">
+                </div>
+            </div>
+
+            <!-- TIMINGS -->
+            <hr style="border: 0; border-top: 1px solid var(--input-border); margin: 20px 0;">
+            <div class="flex-row">
+                <div>
+                    <label>Default Page Duration (sec)</label>
+                    <input type="number" id="global_dur" step="1">
+                </div>
+                <div>
+                    <label>Network Scan Interval (sec)</label>
+                    <input type="number" id="net_interval" step="1">
+                </div>
+            </div>
+            <div class="flex-row">
+                <div>
+                    <label>Hardware Scan Interval (sec)</label>
+                    <input type="number" id="hw_interval" step="1">
+                </div>
+                <div></div>
+            </div>
+            
+            <button class="btn btn-primary" style="width: 100%; margin-top: 10px;" onclick="saveConfig()">💾 Save & Apply to OLED</button>
+            <button class="btn" style="width: 100%; margin-top: 10px; border: 1px solid #888;" onclick="resetConfig()">⚠️ Factory Reset Config</button>
+            <div id="message" style="margin-top: 15px;"></div>
+        </div>
+
+        <!-- Pages Configuration Panel -->
+        <div class="panel">
+            <div class="preview-container">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h3 style="margin: 0;">OLED Live Preview</h3>
+                    <select id="previewPageSelect" onchange="renderPreview()" style="width: auto; padding: 4px 8px; margin: 0; font-size: 13px;"></select>
+                </div>
+                <div class="oled-box" id="oledBoxElem">
+                    <div id="oledPreviewText" class="oled-text"></div>
+                </div>
+                <div style="font-size: 12px; color: #888; margin-top: 5px;">(Simulated layout based on active settings)</div>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3 style="margin: 0;">Screen Pages</h3>
+                <button class="btn" onclick="addPage()">+ Add Page</button>
+            </div>
+            
+            <div id="pagesContainer"></div>
+            
+            <!-- Documentation / Info Box -->
+            <div style="margin-top: 25px; padding: 20px; background: var(--card-bg); border: 1px solid var(--input-border); border-radius: 8px;">
+                <h3 style="margin-top: 0; margin-bottom: 15px; color: var(--text-color); border-bottom: 1px solid var(--input-border); padding-bottom: 10px;">Configuration Guide</h3>
+                
+                <strong style="color: var(--link-color); font-size: 14px;">Network IPs vs. Hotspot Details:</strong>
+                <ul style="margin: 5px 0 15px 0; font-size: 13px; padding-left: 20px;">
+                    <li><b>Network IPs:</b> Lists all active adapters (eth0, wlan0). Can append the Hotspot IP dynamically.</li>
+                    <li><b>Hotspot Details:</b> Displays Hotspot SSID and Password. Option to auto-hide when a device connects.</li>
+                </ul>
+
+                <strong style="color: var(--link-color); font-size: 14px;">Custom Page Variables:</strong>
+                <p style="margin: 5px 0 10px 0; font-size: 13px;">Type these exact markers in any custom text line to inject live data onto the screen:</p>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-family: 'Courier New', Courier, monospace; font-size: 12px; background: var(--input-bg); padding: 12px; border-radius: 6px; border: 1px solid var(--input-border); color: var(--text-color);">
+                    <div>{time} &nbsp;&nbsp;→ 14:30:00</div>
+                    <div>{date} &nbsp;&nbsp;→ 2026-09-20</div>
+                    <div>{hour} / {minute} / {second}</div>
+                    <div>{day} / {month} / {year}</div>
+                    <div>{temp} &nbsp;&nbsp;→ 48.5</div>
+                    <div>{web_port} → 8080</div>
+                    <div>{wifi_ssid}→ Connected WiFi</div>
+                    <div>{ap_ssid} &nbsp;→ Hotspot Name</div>
+                    <div>{ap_pw} &nbsp;&nbsp;&nbsp;→ Hotspot PW</div>
+                    <div>{ap_ip} &nbsp;&nbsp;&nbsp;→ Hotspot IP</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let settings = {};
+        try {
+            settings = JSON.parse('{{ current_settings|safe }}');
+        } catch(e) {}
+        
+        // Ensures defaults are populated if the underlying JSON is missing fields
+        const DEFAULTS = { 
+            enable_screen: true, enable_fan: true, brightness: 255, 
+            fan_on_temp: 55.0, fan_off_temp: 45.0, minimum_fan_run_time_seconds: 60,
+            show_warnings: true, warning_temp: 75.0,
+            rotate_180: false, invert_colors: false, pixel_shift_screensaver: true,
+            quiet_hours_enabled: false, quiet_hours_start: "22:00", quiet_hours_end: "07:00",
+            page_duration_seconds: 20, network_update_interval_seconds: 20, hardware_update_interval_seconds: 5, 
+            pages: [] 
+        };
+        for(let k in DEFAULTS) { if(settings[k] === undefined) settings[k] = DEFAULTS[k]; }
+
+        // Toggles the interface between dark and light themes, saving preference in localStorage
+        function toggleTheme() {
+            const isLight = document.body.classList.toggle('light-mode');
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+            document.getElementById('themeToggle').innerText = isLight ? '🌙 Dark' : '☀️ Light';
+        }
+        document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
+
+        // Repeatedly requests the system's live CPU temperature from the backend
+        async function fetchLiveTemp() {
+            try {
+                const res = await fetch('/api/system/temp');
+                const data = await res.json();
+                if(data.temp !== undefined) {
+                    document.getElementById('liveTemp').innerText = `Pi: ${data.temp.toFixed(1)}°C`;
+                }
+            } catch(e) {}
+        }
+
+        // Bootstraps the form values based on the loaded (or default) JSON configuration
+        function initForm() {
+            document.getElementById('enable_screen').checked = settings.enable_screen;
+            document.getElementById('enable_fan').checked = settings.enable_fan;
+            document.getElementById('fan_on').value = settings.fan_on_temp;
+            document.getElementById('fan_off').value = settings.fan_off_temp;
+            document.getElementById('fan_min_run').value = settings.minimum_fan_run_time_seconds;
+            
+            document.getElementById('brightness').value = settings.brightness;
+            document.getElementById('brightness_val').innerText = settings.brightness;
+            document.getElementById('rotate_180').checked = settings.rotate_180;
+            document.getElementById('invert_colors').checked = settings.invert_colors;
+            document.getElementById('pixel_shift').checked = settings.pixel_shift_screensaver;
+            
+            document.getElementById('show_warnings').checked = settings.show_warnings;
+            document.getElementById('warn_temp').value = settings.warning_temp;
+            
+            document.getElementById('quiet_enabled').checked = settings.quiet_hours_enabled;
+            document.getElementById('quiet_start').value = settings.quiet_hours_start;
+            document.getElementById('quiet_end').value = settings.quiet_hours_end;
+            
+            document.getElementById('global_dur').value = settings.page_duration_seconds;
+            document.getElementById('net_interval').value = settings.network_update_interval_seconds;
+            document.getElementById('hw_interval').value = settings.hardware_update_interval_seconds;
+            
+            renderPages();
+            
+            // Add live re-rendering on all global settings inputs
+            const inputs = document.querySelectorAll('.panel input');
+            inputs.forEach(i => {
+                i.addEventListener('input', () => {
+                    if(i.id === 'brightness') document.getElementById('brightness_val').innerText = i.value;
+                    renderPreview();
+                });
+            });
+            document.getElementById('pagesContainer').addEventListener('input', renderPreview);
+            
+            // Start checking live temp loop
+            fetchLiveTemp();
+            setInterval(fetchLiveTemp, 5000);
+        }
+
+        // Dynamically renders the DOM elements for the list of OLED pages
+        function renderPages() {
+            const container = document.getElementById('pagesContainer');
+            container.innerHTML = '';
+            
+            if(!settings.pages || settings.pages.length === 0) {
+                container.innerHTML = '<div style="text-align:center; color:#888; font-size:14px; padding:20px;">No pages configured. Click Add Page.</div>';
+            }
+
+            // Sync the dropdown menu used for previews
+            const previewSelect = document.getElementById('previewPageSelect');
+            const currentPreview = previewSelect.value;
+            previewSelect.innerHTML = '';
+            (settings.pages || []).forEach((p, i) => {
+                let opt = document.createElement('option');
+                opt.value = i;
+                let typeLabel = p.type === 'network_list' ? 'Network IPs' : (p.type === 'hotspot_details' ? 'Hotspot Details' : 'Custom Text');
+                opt.innerText = `Preview Page ${i + 1} (${typeLabel})`;
+                previewSelect.appendChild(opt);
+            });
+            if (currentPreview && currentPreview < (settings.pages || []).length) {
+                previewSelect.value = currentPreview;
+            } else if ((settings.pages || []).length > 0) {
+                previewSelect.value = "0";
+            }
+
+            (settings.pages || []).forEach((page, index) => {
+                const card = document.createElement('div');
+                card.className = 'page-card';
+                
+                let specifics = '';
+                if(page.type === 'custom') {
+                    const linesText = (page.lines || []).join('\n');
+                    specifics = `
+                        <label>Custom Lines (variables: {time}, {temp}, {wifi_ssid}, {ap_ip})</label>
+                        <textarea id="page_lines_${index}">${linesText}</textarea>
+                    `;
+                } else if(page.type === 'network_list') {
+                    specifics = `
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="page_apip_${index}" ${page.show_ap_ip_when_connected !== false ? 'checked' : ''}> Show Hotspot IP when clients connect
+                        </label>
+                    `;
+                } else if(page.type === 'hotspot_details') {
+                    specifics = `
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="page_hide_${index}" ${page.hide_when_connected !== false ? 'checked' : ''}> Auto-hide this screen when a device connects
+                        </label>
+                    `;
+                }
+
+                card.innerHTML = `
+                    <div class="page-card-header">
+                        <strong>Page ${index + 1}</strong>
+                        <button class="btn-danger" onclick="deletePage(${index})">Remove</button>
+                    </div>
+                    
+                    <div class="flex-row">
+                        <div>
+                            <label>Page Type</label>
+                            <select id="page_type_${index}" onchange="updatePageType(${index}, this.value)">
+                                <option value="network_list" ${page.type === 'network_list' ? 'selected' : ''}>Network IPs</option>
+                                <option value="hotspot_details" ${page.type === 'hotspot_details' ? 'selected' : ''}>Hotspot Details</option>
+                                <option value="custom" ${page.type === 'custom' ? 'selected' : ''}>Custom Text</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Duration (0 to disable)</label>
+                            <input type="number" id="page_dur_${index}" value="${page.duration !== undefined ? page.duration : 20}">
+                        </div>
+                    </div>
+                    
+                    <div class="flex-row">
+                        <div>
+                            <label>Text Alignment</label>
+                            <select id="page_align_${index}">
+                                <option value="left" ${page.align === 'left' ? 'selected' : ''}>Left</option>
+                                <option value="center" ${page.align === 'center' ? 'selected' : ''}>Center</option>
+                                <option value="right" ${page.align === 'right' ? 'selected' : ''}>Right</option>
+                            </select>
+                        </div>
+                    </div>
+                    ${specifics}
+                `;
+                container.appendChild(card);
+            });
+            renderPreview();
+        }
+
+        // Swaps a page's layout type and re-renders the DOM elements
+        function updatePageType(index, newType) {
+            syncStateFromUI();
+            settings.pages[index].type = newType;
+            if(newType === 'custom' && !settings.pages[index].lines) settings.pages[index].lines = ['Time: {time}', 'Temp: {temp}C'];
+            renderPages();
+        }
+
+        // Pushes a new default custom page to the end of the JSON object
+        function addPage() {
+            syncStateFromUI();
+            if(!settings.pages) settings.pages = [];
+            settings.pages.push({ type: 'custom', duration: 20, align: 'left', lines: ['New Custom Page'] });
+            renderPages();
+        }
+
+        // Deletes a page from the JSON object
+        function deletePage(index) {
+            syncStateFromUI();
+            settings.pages.splice(index, 1);
+            renderPages();
+        }
+
+        // Scrapes every input field on the UI to keep the internal `settings` JS object identical to the screen state
+        function syncStateFromUI() {
+            settings.enable_screen = document.getElementById('enable_screen').checked;
+            settings.enable_fan = document.getElementById('enable_fan').checked;
+            settings.fan_on_temp = parseFloat(document.getElementById('fan_on').value);
+            settings.fan_off_temp = parseFloat(document.getElementById('fan_off').value);
+            settings.minimum_fan_run_time_seconds = parseInt(document.getElementById('fan_min_run').value);
+            
+            settings.brightness = parseInt(document.getElementById('brightness').value);
+            settings.rotate_180 = document.getElementById('rotate_180').checked;
+            settings.invert_colors = document.getElementById('invert_colors').checked;
+            settings.pixel_shift_screensaver = document.getElementById('pixel_shift').checked;
+            
+            settings.show_warnings = document.getElementById('show_warnings').checked;
+            settings.warning_temp = parseFloat(document.getElementById('warn_temp').value);
+            
+            settings.quiet_hours_enabled = document.getElementById('quiet_enabled').checked;
+            settings.quiet_hours_start = document.getElementById('quiet_start').value;
+            settings.quiet_hours_end = document.getElementById('quiet_end').value;
+            
+            settings.page_duration_seconds = parseInt(document.getElementById('global_dur').value);
+            settings.network_update_interval_seconds = parseInt(document.getElementById('net_interval').value);
+            settings.hardware_update_interval_seconds = parseInt(document.getElementById('hw_interval').value);
+            
+            (settings.pages || []).forEach((page, i) => {
+                const typeSel = document.getElementById(`page_type_${i}`);
+                if(!typeSel) return;
+                page.type = typeSel.value;
+                page.duration = parseInt(document.getElementById(`page_dur_${i}`).value);
+                page.align = document.getElementById(`page_align_${i}`).value;
+                
+                if(page.type === 'custom') {
+                    page.lines = document.getElementById(`page_lines_${i}`).value.split('\n');
+                } else if(page.type === 'network_list') {
+                    page.show_ap_ip_when_connected = document.getElementById(`page_apip_${i}`).checked;
+                } else if(page.type === 'hotspot_details') {
+                    page.hide_when_connected = document.getElementById(`page_hide_${i}`).checked;
+                }
+            });
+        }
+
+        // Paints the simulated 128x32 OLED display, applying color inversions, rotations, opacities, and variable injections
+        function renderPreview() {
+            syncStateFromUI();
+            const box = document.getElementById('oledPreviewText');
+            const oledBox = document.getElementById('oledBoxElem');
+            
+            // Apply visual modifiers
+            if (settings.invert_colors) {
+                oledBox.style.background = '#fff'; oledBox.style.color = '#000';
+            } else {
+                oledBox.style.background = '#000'; oledBox.style.color = '#fff';
+            }
+            oledBox.style.transform = settings.rotate_180 ? 'rotate(180deg)' : 'none';
+            box.style.color = settings.invert_colors ? '#000' : '#fff';
+            box.style.opacity = Math.max(0.1, settings.brightness / 255.0);
+
+            if (!settings.pages || settings.pages.length === 0) {
+                box.innerHTML = '<div style="text-align:center; padding-top:10px;">No Pages Configured</div>';
+                return;
+            }
+
+            if (!settings.enable_screen) {
+                box.innerHTML = '<div style="text-align:center; padding-top:10px; color:#ff4d4d;">[ OLED Screen is Disabled ]</div>';
+                return;
+            }
+
+            let selectedIdx = parseInt(document.getElementById('previewPageSelect').value);
+            if (isNaN(selectedIdx) || selectedIdx >= settings.pages.length) selectedIdx = 0;
+            let p = settings.pages[selectedIdx];
+            
+            if(!p) { box.innerHTML = ''; return; }
+            if(p.duration <= 0) {
+                box.innerHTML = '<div style="text-align:center; padding-top:10px; color:#888;">[ Page Disabled (Duration 0) ]</div>';
+                return;
+            }
+
+            let lines = [];
+            if(p.type === 'network_list') {
+                lines = ['wlan0: 192.168.1.10:80', 'eth0: 10.0.0.5:80'];
+            } else if(p.type === 'hotspot_details') {
+                lines = ['Pi: My_Hotspot', 'PW: Password123', 'IP: 10.42.0.1:80'];
+            } else if(p.type === 'custom') {
+                const curTempStr = document.getElementById('liveTemp').innerText.replace('Pi: ', '');
+                lines = (p.lines || []).map(l => l
+                    .replace('{time}', '14:30:00').replace('{temp}', curTempStr !== '--.-°C' ? curTempStr.replace('°C','') : '48.5')
+                    .replace('{wifi_ssid}', 'HomeNetwork').replace('{ap_ip}', '10.42.0.1')
+                    .replace('{ap_ssid}', 'Pi_Hotspot').replace('{date}', '2026-09-20')
+                    .replace('{hour}', '14').replace('{minute}', '30').replace('{second}', '00')
+                    .replace('{year}', '2026').replace('{month}', '09').replace('{day}', '20')
+                    .replace('{web_port}', '8080')
+                );
+            }
+
+            box.style.textAlign = p.align === 'center' ? 'center' : (p.align === 'right' ? 'right' : 'left');
+            box.style.width = '100%';
+            box.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+        }
+
+        // Utility to briefly display status notifications
+        function showMessage(type, text) {
+            const m = document.getElementById('message');
+            m.className = type;
+            m.innerText = text;
+            m.style.display = 'block';
+            setTimeout(() => m.style.display = 'none', 4000);
+        }
+
+        // Validates hardware constraints and posts the settings payload to the API
+        async function saveConfig() {
+            syncStateFromUI();
+            
+            let warnings = [];
+            if (!settings.enable_screen) warnings.push("• The OLED screen display is disabled.");
+            if (!settings.enable_fan) warnings.push("• The PoE Fan automatic control is disabled.");
+            if (settings.quiet_hours_enabled) warnings.push(`• Quiet Hours are ON. Screen & Fan will be disabled between ${settings.quiet_hours_start} and ${settings.quiet_hours_end}.`);
+            
+            if (warnings.length > 0) {
+                const msg = "WARNING / NOTICE:\n" + warnings.join("\n") + "\n\nAre you sure you want to save and apply these settings?";
+                if (!confirm(msg)) return;
+            }
+
+            showMessage('success', 'Saving and restarting OLED...');
+            try {
+                const res = await fetch('/api/oled/save', {
+                    method: 'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(settings)
+                });
+                const data = await res.json();
+                showMessage(data.status, data.message);
+            } catch(e) {
+                showMessage('error', 'Network error.');
+            }
+        }
+
+        // Submits an API request to force a factory reset of the OLED monitor settings file
+        async function resetConfig() {
+            if(!confirm("Are you sure you want to completely reset the OLED settings?")) return;
+            showMessage('success', 'Sending reset command...');
+            try {
+                const res = await fetch('/api/oled/reset', { method: 'POST' });
+                const data = await res.json();
+                showMessage(data.status, data.message);
+                if(data.status === 'success') setTimeout(() => window.location.reload(), 1500);
+            } catch(e) {
+                showMessage('error', 'Network error.');
+            }
+        }
+
+        window.onload = initForm;
     </script>
 </body>
 </html>

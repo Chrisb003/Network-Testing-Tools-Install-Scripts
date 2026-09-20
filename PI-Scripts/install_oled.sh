@@ -37,6 +37,7 @@ if [ $INSTALLED -eq 1 ]; then
     echo "4) Uninstall completely"
     echo "5) Exit"
     
+    # Read from /dev/tty to support execution via curl ... | sh
     read -r -p "Select an option [1-5]: " choice < /dev/tty
     case "$choice" in
         1)
@@ -126,25 +127,10 @@ import glob
 import json
 import os
 import re
+import sys
 import smbus
 from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
-
-i2c = busio.I2C(board.SCL, board.SDA)
-disp = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c)
-
-FAN_I2C_ADDR = 0x20
-try:
-    bus = smbus.SMBus(1)
-    fan_present = True
-except Exception:
-    fan_present = False
-
-width = disp.width
-height = disp.height
-image = Image.new("1", (width, height))
-draw = ImageDraw.Draw(image)
-font = ImageFont.load_default()
 
 DEFAULT_JSON = """{
     // =====================================================================
@@ -157,20 +143,20 @@ DEFAULT_JSON = """{
     // If you edit this file, you MUST restart the service for changes to apply:
     // sudo systemctl restart oled_monitor.service
     // 
-    // DYNAMIC VARIABLES FOR CUSTOM PAGES:
-    // {time}      - 14:30:00        {hour}       - 14
-    // {minute}    - 30              {second}     - 00
-    // {date}      - 2026-09-20      {day}        - 20
-    // {month}     - 09              {year}       - 2026
-    // {temp}      - 48.5            {ap_ip}      - 10.42.0.1
-    // {ap_ssid}   - Your_Hotspot    {ap_pw}      - Password123
-    // {wifi_ssid} - Connected_Wifi  {web_port}   - 80/8080
-    //
     // IF YOU BREAK THIS FILE: Just run this command in your terminal to 
     // restore the default settings: touch ~/oled_monitor/reset
     // =====================================================================
     
+    // --- Feature Toggles ---
+    // Enable or disable the OLED screen (true/false)
+    "enable_screen": true,
+    // Enable or disable the PoE Fan automatic control (true/false)
+    "enable_fan": true,
+    
     // --- Hardware & Warning Settings ---
+    // Brightness of the OLED screen (0 to 255, where 255 is maximum brightness)
+    "brightness": 255,
+    
     // Temperature (in Celsius) at which the PoE HAT fan turns ON
     "fan_on_temp": 55.0,
     // Temperature at which the fan turns OFF
@@ -180,6 +166,24 @@ DEFAULT_JSON = """{
     "show_warnings": true,
     // Temperature that triggers the HOT! warning screen
     "warning_temp": 75.0,
+    
+    // --- Extra Screen & Fan Features ---
+    // Rotate the screen upside down (180 degrees)?
+    "rotate_180": false,
+    // Invert colors? (White background, black text)
+    "invert_colors": false,
+    
+    // Shift the screen content 1 pixel every hour to prevent OLED burn-in?
+    "pixel_shift_screensaver": true,
+    
+    // Minimum time (in seconds) the fan must stay on once triggered (Anti-Flutter)
+    "minimum_fan_run_time_seconds": 60,
+    
+    // --- Quiet Hours / Night Mode ---
+    // Turns off screen and relies on passive cooling during these hours
+    "quiet_hours_enabled": false,
+    "quiet_hours_start": "22:00",
+    "quiet_hours_end": "07:00",
     
     // --- Global Display & Timing Settings ---
     // Default time each page is shown (in seconds) if not specified per-page
@@ -226,11 +230,18 @@ DEFAULT_JSON = """{
             
             // Text alignment: "left" (default), "center", or "right"
             "align": "center",
-            
             // Scrolling: set to false to lock text in place
             "scroll_vertical": true,
             "scroll_horizontal": true,
             
+            // DYNAMIC VARIABLES FOR CUSTOM PAGES:
+            // {time}      - 14:30:00        {hour}       - 14
+            // {minute}    - 30              {second}     - 00
+            // {date}      - 2026-09-20      {day}        - 20
+            // {month}     - 09              {year}       - 2026
+            // {temp}      - 48.5            {ap_ip}      - 10.42.0.1
+            // {ap_ssid}   - Your_Hotspot    {ap_pw}      - Password123
+            // {wifi_ssid} - Connected_Wifi  {web_port}   - 80/8080
             "lines": [
                 "Time: {time}",
                 "Date: {date}",
@@ -241,21 +252,14 @@ DEFAULT_JSON = """{
     ]
 }"""
 
-def get_text_width(text, font):
-    try: return int(draw.textlength(text, font=font))
-    except AttributeError:
-        try: return font.getsize(text)[0]
-        except Exception: return len(text) * 6
-
 def load_settings():
     """
     Loads configuration from settings.json. 
-    Handles file resets and invalid JSON gracefully.
+    Handles file resets, strips JSON comments, and handles invalid syntax gracefully.
     """
     settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
     reset_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reset')
     
-    # Self-healing / Reset Trigger
     if os.path.exists(reset_file) or not os.path.exists(settings_file):
         try:
             with open(settings_file, 'w') as f:
@@ -265,6 +269,10 @@ def load_settings():
         except Exception: pass
             
     default_dict = {
+        "enable_screen": True, "enable_fan": True,
+        "brightness": 255, "rotate_180": False, "invert_colors": False,
+        "pixel_shift_screensaver": True, "minimum_fan_run_time_seconds": 60,
+        "quiet_hours_enabled": False, "quiet_hours_start": "22:00", "quiet_hours_end": "07:00",
         "fan_on_temp": 55.0, "fan_off_temp": 45.0,
         "show_warnings": True, "warning_temp": 75.0,
         "page_duration_seconds": 20, 
@@ -279,60 +287,103 @@ def load_settings():
     try:
         with open(settings_file, 'r') as f:
             content = f.read()
-            # Strip // comments
             content = re.sub(r'^\s*//.*$', '', content, flags=re.MULTILINE)
             loaded = json.loads(content)
             for k, v in loaded.items():
                 default_dict[k] = v
     except json.JSONDecodeError:
-        return {"_error": True}
-    except Exception:
-        pass
+        default_dict["_error"] = True
+    except Exception: pass
         
     return default_dict
 
+# Load settings ONLY once on startup
+settings = load_settings()
+ENABLE_SCREEN = settings.get("enable_screen", True)
+ENABLE_FAN = settings.get("enable_fan", True)
+
+# Exit immediately if both are disabled
+if not ENABLE_SCREEN and not ENABLE_FAN:
+    print("Screen and Fan are both disabled in settings.json. Exiting cleanly.")
+    sys.exit(0)
+
+# ---------------------------------------------------------
+# Hardware Initialization
+# ---------------------------------------------------------
+if ENABLE_SCREEN:
+    i2c = busio.I2C(board.SCL, board.SDA)
+    disp = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c)
+    
+    # Safely apply user brightness level (limit bounds between 0 and 255)
+    brightness_level = max(0, min(255, int(settings.get("brightness", 255))))
+    disp.contrast(brightness_level)
+    
+    width = disp.width
+    height = disp.height
+    image = Image.new("1", (width, height))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+
+FAN_I2C_ADDR = 0x20
+fan_present = False
+if ENABLE_FAN:
+    try:
+        bus = smbus.SMBus(1)
+        fan_present = True
+    except Exception:
+        pass
+
+# ---------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------
+def get_text_width(text, font):
+    """
+    Calculates the pixel width of a string to handle horizontal bounce-scrolling.
+    """
+    try: return int(draw.textlength(text, font=font))
+    except AttributeError:
+        try: return font.getsize(text)[0]
+        except Exception: return len(text) * 6
+
 def format_custom_line(text, temp, ap_ssid, ap_ip, ap_psk, wifi_ssid, web_port):
+    """
+    Replaces dynamic string tags (like {time} or {temp}) with live system data.
+    """
     now = datetime.datetime.now()
     replacements = {
-        "{time}": now.strftime("%H:%M:%S"),
-        "{hour}": now.strftime("%H"),
-        "{minute}": now.strftime("%M"),
-        "{second}": now.strftime("%S"),
-        "{date}": now.strftime("%Y-%m-%d"),
-        "{day}": now.strftime("%d"),
-        "{month}": now.strftime("%m"),
-        "{year}": now.strftime("%Y"),
-        "{temp}": str(temp),
-        "{ap_ssid}": ap_ssid or "N/A",
-        "{ap_pw}": ap_psk or "N/A",
-        "{ap_ip}": ap_ip or "N/A",
-        "{wifi_ssid}": wifi_ssid or "Not Connected",
-        "{web_port}": web_port or "80"
+        "{time}": now.strftime("%H:%M:%S"), "{hour}": now.strftime("%H"),
+        "{minute}": now.strftime("%M"), "{second}": now.strftime("%S"),
+        "{date}": now.strftime("%Y-%m-%d"), "{day}": now.strftime("%d"),
+        "{month}": now.strftime("%m"), "{year}": now.strftime("%Y"),
+        "{temp}": str(temp), "{ap_ssid}": ap_ssid or "N/A",
+        "{ap_pw}": ap_psk or "N/A", "{ap_ip}": ap_ip or "N/A",
+        "{wifi_ssid}": wifi_ssid or "Not Connected", "{web_port}": web_port or "80"
     }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
+    for k, v in replacements.items(): text = text.replace(k, v)
     return text
 
 def get_webport():
+    """
+    Scans the home directory for webport configuration files in 
+    'Network-Testing-Tools' and 'pi-wifi-app', extracting and combining 
+    the active port numbers (e.g., '80/8080'). Defaults to '80'.
+    """
     ports = []
-    try:
-        files1 = glob.glob('/home/*/Network-Testing-Tools/webport')
-        if files1:
-            with open(files1[0], 'r') as f:
-                p1 = f.read().strip()
-                if p1: ports.append(p1)
-    except Exception: pass
-    try:
-        files2 = glob.glob('/home/*/pi-wifi-app/webport')
-        if files2:
-            with open(files2[0], 'r') as f:
-                p2 = f.read().strip()
-                if p2 and p2 not in ports: ports.append(p2)
-    except Exception: pass
-    if ports: return "/".join(ports)
-    return "80"
+    for p in ['/home/*/Network-Testing-Tools/webport', '/home/*/pi-wifi-app/webport']:
+        try:
+            files = glob.glob(p)
+            if files:
+                with open(files[0], 'r') as f:
+                    v = f.read().strip()
+                    if v and v not in ports: ports.append(v)
+        except Exception: pass
+    return "/".join(ports) if ports else "80"
 
 def get_networks():
+    """
+    Queries active IPv4 network interfaces using system commands, 
+    filtering out loopback and virtual docker interfaces.
+    """
     networks = []
     try:
         out = subprocess.check_output(['ip', '-o', '-4', 'addr', 'show'], stderr=subprocess.DEVNULL).decode('utf-8')
@@ -347,6 +398,10 @@ def get_networks():
     return networks
 
 def get_hotspot_details():
+    """
+    Read-only inspection of active network manager wireless connections 
+    to fetch AP SSID, AP password, client connection status, and connected Wi-Fi SSID.
+    """
     ap_ssid, ap_psk, ap_has_clients, ap_iface, wifi_ssid = None, None, False, None, None
     try:
         active_conns = subprocess.check_output(['nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show', '--active'], stderr=subprocess.DEVNULL).decode('utf-8').split('\n')
@@ -369,22 +424,42 @@ def get_hotspot_details():
     return ap_ssid, ap_psk, ap_has_clients, ap_iface, wifi_ssid
 
 def get_temp():
+    """
+    Measures the current Raspberry Pi CPU temperature in Celsius.
+    """
     try:
         out = subprocess.check_output(['vcgencmd', 'measure_temp'], stderr=subprocess.DEVNULL).decode('utf-8')
         return float(out.replace('temp=', '').replace('\'C\n', ''))
     except Exception: return 0.0
 
 def get_undervoltage():
+    """
+    Checks the system throttled flags to detect power undervoltage issues.
+    """
     try:
         out = subprocess.check_output(['vcgencmd', 'get_throttled'], stderr=subprocess.DEVNULL).decode('utf-8')
         val = int(out.replace('throttled=', '').strip(), 16)
         return (val & 1) == 1
     except Exception: return False
 
+def is_quiet_hours(start_str, end_str):
+    """
+    Checks if the current time falls within the configured Quiet Hours window.
+    """
+    try:
+        now = datetime.datetime.now().time()
+        st = datetime.datetime.strptime(start_str, "%H:%M").time()
+        ed = datetime.datetime.strptime(end_str, "%H:%M").time()
+        if st < ed:
+            return st <= now <= ed
+        else:
+            return now >= st or now <= ed
+    except Exception:
+        return False
 
-# Load settings ONLY once on startup to save SD card resources
-settings = load_settings()
-
+# ---------------------------------------------------------
+# Main Execution Loop
+# ---------------------------------------------------------
 last_hw_fetch = 0
 last_net_fetch = 0
 
@@ -393,171 +468,226 @@ ap_ssid, ap_psk, ap_has_clients, ap_iface, wifi_ssid = None, None, False, None, 
 web_port = "80"
 temp, uv = 0.0, False
 
+# State Trackers
 current_page_idx = 0
 page_start_time = time.time()
 FPS_DELAY = 0.05    
+
+fan_currently_on = False
+fan_last_on_time = 0
+screen_sleeping = False
+
+# Screen Color Formatting
+bg_col = 255 if settings.get("invert_colors", False) else 0
+txt_col = 0 if settings.get("invert_colors", False) else 255
+rotate_180 = settings.get("rotate_180", False)
 
 try:
     while True:
         current_time = time.time()
         
-        # Hardware & Fan Checks (Polled on its own configurable interval)
+        # Determine Quiet Hours State
+        q_enabled = settings.get("quiet_hours_enabled", False)
+        in_quiet = q_enabled and is_quiet_hours(settings.get("quiet_hours_start", "22:00"), settings.get("quiet_hours_end", "07:00"))
+        
+        # Hardware & Fan Checks (Polled on configurable interval)
         hw_interval = settings.get("hardware_update_interval_seconds", 5)
         if current_time - last_hw_fetch > hw_interval:
             temp = get_temp()
             uv = get_undervoltage()
-            if fan_present:
+            
+            if ENABLE_FAN and fan_present:
                 try:
-                    if temp >= settings.get("fan_on_temp", 55.0): bus.write_byte(FAN_I2C_ADDR, 0xFE)
-                    elif temp <= settings.get("fan_off_temp", 45.0): bus.write_byte(FAN_I2C_ADDR, 0xFF)
+                    # In quiet hours, only trigger the fan if we hit the critical warning temp to stay silent
+                    turn_on_temp = settings.get("warning_temp", 75.0) if in_quiet else settings.get("fan_on_temp", 55.0)
+                    
+                    if temp >= turn_on_temp:
+                        if not fan_currently_on:
+                            bus.write_byte(FAN_I2C_ADDR, 0xFE) # Turn ON
+                            fan_currently_on = True
+                            fan_last_on_time = current_time
+                    elif temp <= settings.get("fan_off_temp", 45.0):
+                        if fan_currently_on:
+                            # Anti-Flutter: Ensure the fan runs for the minimum time before turning off
+                            if (current_time - fan_last_on_time) >= settings.get("minimum_fan_run_time_seconds", 60):
+                                bus.write_byte(FAN_I2C_ADDR, 0xFF) # Turn OFF
+                                fan_currently_on = False
                 except Exception: pass
             last_hw_fetch = current_time
 
-        # Network Checks (Polled on its own configurable interval)
-        net_interval = settings.get("network_update_interval_seconds", 20)
-        if current_time - last_net_fetch > net_interval:
-            networks = get_networks()
-            ap_ssid, ap_psk, ap_has_clients, ap_iface, wifi_ssid = get_hotspot_details()
-            web_port = get_webport()
-            last_net_fetch = current_time
+        # Screen Rendering Engine
+        if ENABLE_SCREEN:
+            SHOW_WARN = settings.get("show_warnings", True)
+            WARN_TEMP = settings.get("warning_temp", 75.0)
+            is_warning_state = SHOW_WARN and (uv or temp > WARN_TEMP)
+            
+            # Night Mode: Power off the screen if in quiet hours AND there are no critical warnings
+            if in_quiet and not is_warning_state:
+                if not screen_sleeping:
+                    try: disp.poweroff()
+                    except Exception: 
+                        draw.rectangle((0, 0, width, height), outline=bg_col, fill=bg_col)
+                        disp.image(image)
+                        disp.show()
+                    screen_sleeping = True
+                time.sleep(hw_interval if hw_interval > 0 else 1)
+                continue
+            else:
+                if screen_sleeping:
+                    try: disp.poweron()
+                    except Exception: pass
+                    screen_sleeping = False
 
-        draw.rectangle((0, 0, width, height), outline=0, fill=0)
-        
-        # 1. Invalid JSON check
-        if settings.get("_error"):
-            draw.text((0, 0), "Settings Invalid!", font=font, fill=255)
-            draw.text((0, 11), "Check settings.json", font=font, fill=255)
-            disp.image(image)
-            disp.show()
-            time.sleep(FPS_DELAY)
-            continue
+            # Pixel Shifting Logic (1 pixel diagonal shift every hour to prevent burn-in)
+            px_shift = settings.get("pixel_shift_screensaver", True)
+            ox = int(current_time / 3600) % 2 if px_shift else 0
+            oy = int((current_time / 3600) + 1) % 2 if px_shift else 0
+
+            # Network Checks (Polled on configurable interval)
+            net_interval = settings.get("network_update_interval_seconds", 20)
+            if current_time - last_net_fetch > net_interval:
+                networks = get_networks()
+                ap_ssid, ap_psk, ap_has_clients, ap_iface, wifi_ssid = get_hotspot_details()
+                web_port = get_webport()
+                last_net_fetch = current_time
+
+            # Clear Screen Background
+            draw.rectangle((0, 0, width, height), outline=bg_col, fill=bg_col)
             
-        # 2. Hardware Warnings check
-        SHOW_WARN = settings.get("show_warnings", True)
-        WARN_TEMP = settings.get("warning_temp", 75.0)
-        if SHOW_WARN and (uv or temp > WARN_TEMP):
-            if int(current_time * 2) % 2 == 0:
-                if uv: draw.text((0, 0), "WARNING: VOLT DROP!", font=font, fill=255)
-                if temp > WARN_TEMP: draw.text((0, 16), f"WARNING: HOT! {temp}C", font=font, fill=255)
-            disp.image(image)
-            disp.show()
-            time.sleep(FPS_DELAY)
-            continue
-            
-        # 3. Compile Active Pages
-        # Note: We recompile this list every frame (every 0.05s) so that {time} and {second} variables update in real-time.
-        pages_to_render = []
-        ap_ip_current = ""
-        for iface, ip in networks:
-            if iface == ap_iface: ap_ip_current = ip
+            # 1. Invalid JSON check
+            if settings.get("_error"):
+                draw.text((ox, oy), "Settings Invalid!", font=font, fill=txt_col)
+                draw.text((ox, oy + 11), "Check settings.json", font=font, fill=txt_col)
+                disp_image = image.rotate(180) if rotate_180 else image
+                disp.image(disp_image)
+                disp.show()
+                time.sleep(FPS_DELAY)
+                continue
                 
-        global_dur = settings.get("page_duration_seconds", 20)
-        
-        for page_config in settings.get("pages", []):
-            ptype = page_config.get("type")
-            dur = page_config.get("duration", global_dur)
-            s_v = page_config.get("scroll_vertical", True)
-            s_h = page_config.get("scroll_horizontal", True)
-            align = page_config.get("align", "left")
-            
-            if dur <= 0: continue
+            # 2. Hardware Warnings check
+            if is_warning_state:
+                if int(current_time * 2) % 2 == 0:
+                    if uv: draw.text((ox, oy), "WARNING: VOLT DROP!", font=font, fill=txt_col)
+                    if temp > WARN_TEMP: draw.text((ox, oy + 16), f"WARNING: HOT! {temp}C", font=font, fill=txt_col)
+                disp_image = image.rotate(180) if rotate_180 else image
+                disp.image(disp_image)
+                disp.show()
+                time.sleep(FPS_DELAY)
+                continue
                 
-            if ptype == "network_list":
-                nlines = []
-                show_ap_ip = page_config.get("show_ap_ip_when_connected", True)
-                for iface, ip in networks:
-                    if iface == ap_iface:
-                        if show_ap_ip and ap_has_clients:
-                            nlines.append(f"Pi: {ip}:{web_port}")
-                    else:
-                        nlines.append(f"{iface}: {ip}:{web_port}")
-                if nlines:
-                    pages_to_render.append({"type": "custom", "lines": nlines, "duration": dur, "s_v": s_v, "s_h": s_h, "align": align})
+            # 3. Compile Active Pages (recompiled every frame for live variables like {time})
+            pages_to_render = []
+            ap_ip_current = ""
+            for iface, ip in networks:
+                if iface == ap_iface: ap_ip_current = ip
                     
-            elif ptype == "hotspot_details":
-                if ap_ssid and ap_psk:
-                    hide = page_config.get("hide_when_connected", True)
-                    if not (hide and ap_has_clients):
-                        ip_str = ap_ip_current if ap_ip_current else "10.42.0.1"
-                        pages_to_render.append({
-                            "type": "custom", "duration": dur,
-                            "lines": [f"Pi: {ap_ssid}", f"PW: {ap_psk}", f"IP: {ip_str}:{web_port}"],
-                            "s_v": s_v, "s_h": s_h, "align": align
-                        })
+            global_dur = settings.get("page_duration_seconds", 20)
+            for page_config in settings.get("pages", []):
+                ptype = page_config.get("type")
+                dur = page_config.get("duration", global_dur)
+                s_v = page_config.get("scroll_vertical", True)
+                s_h = page_config.get("scroll_horizontal", True)
+                align = page_config.get("align", "left")
+                
+                if dur <= 0: continue
+                    
+                if ptype == "network_list":
+                    nlines = []
+                    show_ap_ip = page_config.get("show_ap_ip_when_connected", True)
+                    for iface, ip in networks:
+                        if iface == ap_iface:
+                            if show_ap_ip and ap_has_clients:
+                                nlines.append(f"Pi: {ip}:{web_port}")
+                        else:
+                            nlines.append(f"{iface}: {ip}:{web_port}")
+                    if nlines:
+                        pages_to_render.append({"type": "custom", "lines": nlines, "duration": dur, "s_v": s_v, "s_h": s_h, "align": align})
                         
-            elif ptype == "custom":
-                clines = []
-                for line in page_config.get("lines", []):
-                    clines.append(format_custom_line(str(line), temp, ap_ssid, ap_ip_current, ap_psk, wifi_ssid, web_port))
-                pages_to_render.append({"type": "custom", "lines": clines, "duration": dur, "s_v": s_v, "s_h": s_h, "align": align})
-                
-        # 4. Unified Rendering Engine
-        if not pages_to_render:
-            draw.text((0, 12), "No Active Pages", font=font, fill=255)
-        else:
-            if current_page_idx >= len(pages_to_render):
-                current_page_idx = 0
-                page_start_time = current_time
-                
-            current_page = pages_to_render[current_page_idx]
-            active_dur = current_page["duration"]
-            s_v = current_page["s_v"]
-            s_h = current_page["s_h"]
-            align = current_page["align"]
-            elapsed = current_time - page_start_time
-            
-            # Switch to next page?
-            if elapsed >= active_dur:
-                current_page_idx = (current_page_idx + 1) % len(pages_to_render)
+                elif ptype == "hotspot_details":
+                    if ap_ssid and ap_psk:
+                        hide = page_config.get("hide_when_connected", True)
+                        if not (hide and ap_has_clients):
+                            ip_str = ap_ip_current if ap_ip_current else "10.42.0.1"
+                            pages_to_render.append({
+                                "type": "custom", "duration": dur,
+                                "lines": [f"Pi: {ap_ssid}", f"PW: {ap_psk}", f"IP: {ip_str}:{web_port}"],
+                                "s_v": s_v, "s_h": s_h, "align": align
+                            })
+                            
+                elif ptype == "custom":
+                    clines = []
+                    for line in page_config.get("lines", []):
+                        clines.append(format_custom_line(str(line), temp, ap_ssid, ap_ip_current, ap_psk, wifi_ssid, web_port))
+                    pages_to_render.append({"type": "custom", "lines": clines, "duration": dur, "s_v": s_v, "s_h": s_h, "align": align})
+                    
+            # Render Pages via 2D scrolling engine
+            if not pages_to_render:
+                draw.text((ox, oy + 12), "No Active Pages", font=font, fill=txt_col)
+            else:
+                if current_page_idx >= len(pages_to_render):
+                    current_page_idx = 0
+                    page_start_time = current_time
+                    
                 current_page = pages_to_render[current_page_idx]
-                page_start_time = current_time
-                elapsed = 0
                 active_dur = current_page["duration"]
                 s_v = current_page["s_v"]
                 s_h = current_page["s_h"]
                 align = current_page["align"]
+                elapsed = current_time - page_start_time
                 
-            line_height = 11
-            total_height = len(current_page["lines"]) * line_height
-            y_base = 0
-            
-            # Vertical Scrolling Logic
-            if s_v and total_height > height:
-                max_y = total_height - height
-                sdur = active_dur - 2.0 # 1s pause at top and bottom
-                if sdur <= 0.1: sdur = 0.1
-                if elapsed < 1.0: y_base = 0
-                elif elapsed > active_dur - 1.0: y_base = -max_y
-                else: y_base = -int(((elapsed - 1.0)/sdur) * max_y)
-                
-            # Horizontal Scrolling & Alignment Logic
-            for i, line in enumerate(current_page["lines"]):
-                dy = y_base + (i * line_height)
-                if -line_height < dy < height:
-                    lw = get_text_width(line, font)
-                    xb = 0
-                    if lw > width and s_h:
-                        mx = lw - width + 10
-                        cyc = mx * 0.05 + 2.0
-                        ph = (elapsed % (cyc * 2))
-                        if ph < cyc: xp = max(0, ph - 1.0) / (cyc - 1.0) if cyc > 1 else 0
-                        else: xp = max(0, (cyc * 2 - ph) - 1.0) / (cyc - 1.0) if cyc > 1 else 0
-                        xb = max(min(-int(xp * mx), 0), -mx)
-                    else:
-                        if align == "center":
-                            xb = (width - lw) // 2
-                        elif align == "right":
-                            xb = width - lw
-                        else:
-                            xb = 0
-                    draw.text((xb, dy), line, font=font, fill=255)
+                # Next Page Trigger
+                if elapsed >= active_dur:
+                    current_page_idx = (current_page_idx + 1) % len(pages_to_render)
+                    current_page = pages_to_render[current_page_idx]
+                    page_start_time = current_time
+                    elapsed = 0
+                    active_dur = current_page["duration"]
+                    s_v = current_page["s_v"]
+                    s_h = current_page["s_h"]
+                    align = current_page["align"]
                     
-        disp.image(image)
-        disp.show()
-        time.sleep(FPS_DELAY)
+                line_height = 11
+                total_height = len(current_page["lines"]) * line_height
+                y_base = 0
+                
+                # Vertical Scrolling
+                if s_v and total_height > height:
+                    max_y = total_height - height
+                    sdur = active_dur - 2.0 
+                    if sdur <= 0.1: sdur = 0.1
+                    if elapsed < 1.0: y_base = 0
+                    elif elapsed > active_dur - 1.0: y_base = -max_y
+                    else: y_base = -int(((elapsed - 1.0)/sdur) * max_y)
+                    
+                # Horizontal Scrolling & Alignment
+                for i, line in enumerate(current_page["lines"]):
+                    dy = y_base + (i * line_height)
+                    if -line_height < dy < height:
+                        lw = get_text_width(line, font)
+                        xb = 0
+                        if lw > width and s_h:
+                            mx = lw - width + 10
+                            cyc = mx * 0.05 + 2.0
+                            ph = (elapsed % (cyc * 2))
+                            if ph < cyc: xp = max(0, ph - 1.0) / (cyc - 1.0) if cyc > 1 else 0
+                            else: xp = max(0, (cyc * 2 - ph) - 1.0) / (cyc - 1.0) if cyc > 1 else 0
+                            xb = max(min(-int(xp * mx), 0), -mx)
+                        else:
+                            if align == "center": xb = (width - lw) // 2
+                            elif align == "right": xb = width - lw
+                        draw.text((xb + ox, dy + oy), line, font=font, fill=txt_col)
+                        
+            disp_image = image.rotate(180) if rotate_180 else image
+            disp.image(disp_image)
+            disp.show()
+            time.sleep(FPS_DELAY)
+            
+        else:
+            # If screen is disabled, sleep until next hardware fan check to conserve CPU.
+            time.sleep(hw_interval if hw_interval > 0 else 1)
         
 except KeyboardInterrupt:
-    if fan_present:
+    if ENABLE_FAN and fan_present:
         try: bus.write_byte(FAN_I2C_ADDR, 0xFF)
         except Exception: pass
 EOF
