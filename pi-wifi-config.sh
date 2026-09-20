@@ -1,13 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.0
+# Version: 1.3 (POSIX sh compatible)
 # ==========================================
-VERSION="1.0"
+VERSION="1.3"
 
-# Determine the current user and home directory
-if [ "$EUID" -eq 0 ]; then
+# Determine the current user and home directory using standard POSIX commands
+if [ "$(id -u)" -eq 0 ]; then
     if [ -n "$SUDO_USER" ]; then
         ACTUAL_USER="$SUDO_USER"
         USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
@@ -16,7 +16,7 @@ if [ "$EUID" -eq 0 ]; then
         USER_HOME="/root"
     fi
 else
-    ACTUAL_USER="$USER"
+    ACTUAL_USER=$(id -un)
     USER_HOME="$HOME"
 fi
 
@@ -30,36 +30,48 @@ DEFAULT_PORT="8080"
 # ==========================================
 if [ -d "$APP_DIR" ] \vert{}\vert{} [ -f "$SERVICE_FILE" ]; then
     echo "The WiFi Configurator (v$VERSION) appears to be already installed in$APP_DIR."
-    read -p "Do you want to uninstall it? (y/N): " uninstall_choice
-    if [[ "$uninstall_choice" =~ ^[Yy]$ ]]; then
-        echo "Escalating privileges to stop and remove services..."
-        if [ -f "$SERVICE_FILE" ]; then
-            sudo systemctl stop pi-wifi-app
-            sudo systemctl disable pi-wifi-app
-            sudo rm "$SERVICE_FILE"
-            sudo systemctl daemon-reload
-        fi
-        
-        echo "Removing application files..."
-        rm -rf "$APP_DIR"
-        
-        echo "Uninstallation complete."
-        exit 0
-    else
-        echo "Exiting without making changes."
-        exit 0
-    fi
+    printf "Do you want to uninstall it? (y/N): "
+    read uninstall_choice
+    
+    case "$uninstall_choice" in
+        [Yy]* )
+            echo "Escalating privileges to stop and remove services..."
+            if [ -f "$SERVICE_FILE" ]; then
+                sudo systemctl stop pi-wifi-app
+                sudo systemctl disable pi-wifi-app
+                sudo rm -f "$SERVICE_FILE"
+                sudo systemctl daemon-reload
+            fi
+            
+            echo "Removing application files..."
+            sudo rm -rf "$APP_DIR"
+            
+            echo "Uninstallation complete."
+            exit 0
+            ;;
+        * )
+            echo "Exiting without making changes."
+            exit 0
+            ;;
+    esac
 fi
 
 # ==========================================
 # INSTALLATION LOGIC
 # ==========================================
 echo "Ready to install Pi WiFi Configurator v$VERSION in$APP_DIR."
-read -p "Proceed with installation? (y/N): " install_choice
-if [[ ! "$install_choice" =~ ^[Yy]$ ]]; then
-    echo "Installation aborted."
-    exit 0
-fi
+printf "Proceed with installation? (y/N): "
+read install_choice
+
+case "$install_choice" in
+    [Yy]* )
+        # User agreed, continue
+        ;;
+    * )
+        echo "Installation aborted."
+        exit 0
+        ;;
+esac
 
 echo "Escalating privileges to install system dependencies..."
 sudo apt-get update
@@ -74,16 +86,27 @@ echo "$DEFAULT_PORT" > "$PORT_FILE"
 # ==========================================
 # AUTHENTICATION SETUP
 # ==========================================
-read -p "Do you want to enable web authentication? (y/N): " auth_choice
-if [[ "$auth_choice" =~ ^[Yy]$ ]]; then
-    read -p "Enter username: " WEB_USER
-    read -s -p "Enter password: " WEB_PASS
-    echo ""
-    # Use python to safely generate a secure hash
-    WEB_HASH=$(python3 -c "import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.argv[1]))" "$WEB_PASS")
-    echo "$WEB_USER:$WEB_HASH" > "$APP_DIR/user"
-    echo "Authentication configured."
-fi
+printf "Do you want to enable web authentication? (y/N): "
+read auth_choice
+
+case "$auth_choice" in
+    [Yy]* )
+        printf "Enter username: "
+        read WEB_USER
+        
+        printf "Enter password: "
+        # Hide typed text for password using stty
+        stty -echo
+        read WEB_PASS
+        stty echo
+        echo ""
+        
+        # Use python to safely generate a secure hash
+        WEB_HASH=$(python3 -c "import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.argv[1]))" "$WEB_PASS")
+        echo "$WEB_USER:$WEB_HASH" > "$APP_DIR/user"
+        echo "Authentication configured."
+        ;;
+esac
 
 echo "Writing app.py..."
 cat << 'EOF' > "$APP_DIR/app.py"
@@ -95,7 +118,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-# Set session to last a full year so users don't get logged out on the same device
 app.permanent_session_lifetime = timedelta(days=365)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -103,9 +125,6 @@ user_file = os.path.join(script_dir, 'user')
 reset_file = os.path.join(script_dir, 'reset')
 port_file_path = os.path.join(script_dir, 'webport')
 
-# ==========================================
-# STARTUP LOGIC
-# ==========================================
 if os.path.exists(reset_file):
     try:
         if os.path.exists(user_file):
@@ -142,7 +161,7 @@ def login():
         saved_user, saved_hash = get_credentials()
         
         if saved_user == user and saved_hash and check_password_hash(saved_hash, pw):
-            session.permanent = True # Enables the 365-day persistency
+            session.permanent = True
             session['logged_in'] = True
             return redirect(url_for('index'))
         return render_template('login.html', error="Invalid credentials")
@@ -210,7 +229,7 @@ def connect():
         return jsonify({'status': 'error', 'message': str(e)})
 
 if __name__ == '__main__':
-    port = 8080 # Fallback port
+    port = 8080
     try:
         if os.path.exists(port_file_path):
             with open(port_file_path, 'r') as f:
@@ -542,4 +561,3 @@ echo "Installation complete!"
 echo "Port configuration is saved in: $PORT_FILE"
 echo "To reset auth physically, run:"
 echo "touch $APP_DIR/reset && sudo systemctl restart pi-wifi-app"
-echo "==================================================="
