@@ -184,6 +184,9 @@ DEFAULT_JSON = """{
     // --- Global Display & Timing Settings ---
     // Default time each page is shown (in seconds) if not specified per-page
     "page_duration_seconds": 20,
+    
+    // How often to check for hardware changes like CPU Temp (in seconds)
+    "hardware_update_interval_seconds": 5,
     // How often to scan for new IP addresses and Wifi changes (in seconds)
     "network_update_interval_seconds": 20,
     
@@ -264,7 +267,9 @@ def load_settings():
     default_dict = {
         "fan_on_temp": 55.0, "fan_off_temp": 45.0,
         "show_warnings": True, "warning_temp": 75.0,
-        "page_duration_seconds": 20, "network_update_interval_seconds": 20,
+        "page_duration_seconds": 20, 
+        "hardware_update_interval_seconds": 5,
+        "network_update_interval_seconds": 20,
         "pages": [
             {"type": "network_list", "show_ap_ip_when_connected": True, "duration": 20},
             {"type": "hotspot_details", "hide_when_connected": True, "duration": 20}
@@ -396,8 +401,9 @@ try:
     while True:
         current_time = time.time()
         
-        # Hardware & Fan Checks
-        if current_time - last_hw_fetch > 5:
+        # Hardware & Fan Checks (Polled on its own configurable interval)
+        hw_interval = settings.get("hardware_update_interval_seconds", 5)
+        if current_time - last_hw_fetch > hw_interval:
             temp = get_temp()
             uv = get_undervoltage()
             if fan_present:
@@ -407,7 +413,7 @@ try:
                 except Exception: pass
             last_hw_fetch = current_time
 
-        # Network Checks
+        # Network Checks (Polled on its own configurable interval)
         net_interval = settings.get("network_update_interval_seconds", 20)
         if current_time - last_net_fetch > net_interval:
             networks = get_networks()
@@ -439,6 +445,7 @@ try:
             continue
             
         # 3. Compile Active Pages
+        # Note: We recompile this list every frame (every 0.05s) so that {time} and {second} variables update in real-time.
         pages_to_render = []
         ap_ip_current = ""
         for iface, ip in networks:

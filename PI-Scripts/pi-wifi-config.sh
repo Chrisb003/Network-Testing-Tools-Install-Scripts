@@ -2,7 +2,7 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.0.0 (Port Management & Safe Fallback)
+# Version: 1.0.0 (OLED Hardware Interval Added)
 # ==========================================
 VERSION="1.0.0"
 
@@ -210,7 +210,6 @@ def get_interfaces_info():
                     if mode_res.stdout.strip() == 'ap': is_hotspot = True
                 interfaces.append({'name': dev, 'is_hotspot': is_hotspot})
         
-        # Pick a default interface that is not a hotspot
         for iface in interfaces:
             if not iface['is_hotspot']:
                 default_iface = iface['name']
@@ -225,7 +224,6 @@ def get_hotspot_policy():
     """Reads the saved policy on whether the hotspot should persist on boot."""
     if os.path.exists(hotspot_policy_file):
         with open(hotspot_policy_file, 'r') as f: return f.read().strip() == 'true'
-    # Default to true if currently running
     info = get_interfaces_info()
     for iface in info['interfaces']:
         if iface['is_hotspot']:
@@ -284,13 +282,11 @@ def logout():
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
     if request.method == 'POST':
-        # Save Hotspot Policy
         force_hs = request.form.get('force_hotspot') == 'on'
         with open(hotspot_policy_file, 'w') as f:
             f.write('true' if force_hs else 'false')
         set_hotspot_priority(100 if force_hs else 0)
         
-        # Process User Credentials
         new_user = request.form.get('username')
         new_pw = request.form.get('password')
         if new_user and new_pw:
@@ -299,18 +295,14 @@ def settings():
             session.permanent = True
             session['logged_in'] = True
             
-        # Process Port Change
         new_port_str = request.form.get('port')
         port_changed_to = None
         if new_port_str and new_port_str.isdigit():
             new_port = int(new_port_str)
             current_port = get_current_port()
             if new_port != current_port:
-                # Save backup of the working port
                 with open(port_file_path + '.bak', 'w') as f: f.write(str(current_port))
-                # Write new port
                 with open(port_file_path, 'w') as f: f.write(str(new_port))
-                # Restart the systemd service gracefully in the background
                 subprocess.Popen(['/bin/sh', '-c', 'sleep 1.5 && systemctl restart pi-wifi-app.service'])
                 port_changed_to = new_port
                 
@@ -333,8 +325,18 @@ def settings():
     return render_template('settings.html', current_user=get_credentials()[0], force_hotspot=get_hotspot_policy())
 
 # ==========================================
-# OLED CONFIGURATION ROUTES
+# SYSTEM API & OLED ROUTES
 # ==========================================
+@app.route('/api/system/temp', methods=['GET'])
+def system_temp():
+    """Returns the current internal hardware temperature of the Raspberry Pi."""
+    try:
+        out = subprocess.check_output(['vcgencmd', 'measure_temp'], stderr=subprocess.DEVNULL).decode('utf-8')
+        temp = float(out.replace('temp=', '').replace('\'C\n', ''))
+        return jsonify({'temp': temp})
+    except Exception:
+        return jsonify({'temp': 0.0})
+
 @app.route('/oled')
 def oled_page():
     oled_dir = get_oled_dir()
@@ -474,7 +476,6 @@ if __name__ == '__main__':
             print(f"Fallback port {port} is ALSO unavailable. Falling back to 8080...")
             port = 8080
             
-        # Re-save the working port so it remembers the successful fallback
         try:
             with open(port_file_path, 'w') as f:
                 f.write(str(port))
@@ -685,7 +686,6 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
         .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; font-weight: normal; color: var(--text-color);}
         .checkbox-label input { width: auto; margin: 0 10px 0 0; }
         
-        /* OLED Preview Box */
         .preview-container { text-align: center; margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid var(--input-border); }
         .oled-box { width: 256px; height: 64px; background: #000; margin: 0 auto; border: 4px solid #333; border-radius: 4px; padding: 4px; box-sizing: border-box; position: relative; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.5);}
         .oled-text { color: #fff; font-family: 'Courier New', Courier, monospace; font-size: 14px; line-height: 14px; white-space: pre; position: absolute; top: 4px; left: 4px;}
@@ -707,6 +707,8 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
         body.light-mode .success { background-color: #d4edda; color: #155724; }
         .error { background-color: #4a141c; color: #ffb3b8; }
         body.light-mode .error { background-color: #f8d7da; color: #721c24; }
+
+        .live-badge { float: right; font-size: 11px; font-weight: normal; padding: 2px 6px; background: var(--input-bg); border-radius: 4px; color: var(--text-color); border: 1px solid var(--input-border);}
     </style>
 </head>
 <body>
@@ -727,7 +729,7 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
             
             <div class="flex-row">
                 <div>
-                    <label>Fan Turn ON Temp (°C)</label>
+                    <label>Fan Turn ON Temp (°C) <span id="liveTemp" class="live-badge">Pi: --.-°C</span></label>
                     <input type="number" id="fan_on" step="0.5">
                 </div>
                 <div>
@@ -753,6 +755,14 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
                     <label>Network Scan Interval (sec)</label>
                     <input type="number" id="net_interval" step="1">
                 </div>
+            </div>
+
+            <div class="flex-row">
+                <div>
+                    <label>Hardware Scan Interval (sec)</label>
+                    <input type="number" id="hw_interval" step="1">
+                </div>
+                <div></div>
             </div>
             
             <button class="btn btn-primary" style="width: 100%; margin-top: 10px;" onclick="saveConfig()">💾 Save & Apply to OLED</button>
@@ -784,7 +794,7 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
         try {
             settings = JSON.parse('{{ current_settings|safe }}');
         } catch(e) {
-            settings = { fan_on_temp: 55, fan_off_temp: 45, show_warnings: true, warning_temp: 75, page_duration_seconds: 20, network_update_interval_seconds: 20, pages: [] };
+            settings = { fan_on_temp: 55, fan_off_temp: 45, show_warnings: true, warning_temp: 75, page_duration_seconds: 20, network_update_interval_seconds: 20, hardware_update_interval_seconds: 5, pages: [] };
         }
 
         function toggleTheme() {
@@ -794,6 +804,16 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
         }
         document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
 
+        async function fetchLiveTemp() {
+            try {
+                const res = await fetch('/api/system/temp');
+                const data = await res.json();
+                if(data.temp !== undefined) {
+                    document.getElementById('liveTemp').innerText = `Pi: ${data.temp.toFixed(1)}°C`;
+                }
+            } catch(e) {}
+        }
+
         function initForm() {
             document.getElementById('fan_on').value = settings.fan_on_temp || 55;
             document.getElementById('fan_off').value = settings.fan_off_temp || 45;
@@ -801,10 +821,15 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
             document.getElementById('warn_temp').value = settings.warning_temp || 75;
             document.getElementById('global_dur').value = settings.page_duration_seconds || 20;
             document.getElementById('net_interval').value = settings.network_update_interval_seconds || 20;
+            document.getElementById('hw_interval').value = settings.hardware_update_interval_seconds || 5;
+            
             renderPages();
             
-            // Add listeners to update preview live
             document.getElementById('pagesContainer').addEventListener('input', renderPreview);
+            
+            // Start checking live temp
+            fetchLiveTemp();
+            setInterval(fetchLiveTemp, 5000);
         }
 
         function renderPages() {
@@ -905,6 +930,7 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
             settings.warning_temp = parseFloat(document.getElementById('warn_temp').value);
             settings.page_duration_seconds = parseInt(document.getElementById('global_dur').value);
             settings.network_update_interval_seconds = parseInt(document.getElementById('net_interval').value);
+            settings.hardware_update_interval_seconds = parseInt(document.getElementById('hw_interval').value);
             
             (settings.pages || []).forEach((page, i) => {
                 const typeSel = document.getElementById(`page_type_${i}`);
@@ -927,7 +953,6 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
             syncStateFromUI();
             const box = document.getElementById('oledPreviewText');
             
-            // Find the first active page to preview
             let p = null;
             for(let page of (settings.pages || [])) {
                 if(page.duration > 0) { p = page; break; }
@@ -944,15 +969,14 @@ cat << 'EOF' > "$APP_DIR/templates/oled.html"
             } else if(p.type === 'hotspot_details') {
                 lines = ['Pi: My_Hotspot', 'PW: Password123', 'IP: 10.42.0.1:80'];
             } else if(p.type === 'custom') {
-                // Mock variable replacement
+                const curTempStr = document.getElementById('liveTemp').innerText.replace('Pi: ', '');
                 lines = (p.lines || []).map(l => l
-                    .replace('{time}', '14:30:00').replace('{temp}', '48.5')
+                    .replace('{time}', '14:30:00').replace('{temp}', curTempStr !== '--.-°C' ? curTempStr.replace('°C','') : '48.5')
                     .replace('{wifi_ssid}', 'HomeNetwork').replace('{ap_ip}', '10.42.0.1')
                     .replace('{ap_ssid}', 'Pi_Hotspot').replace('{date}', '2026-09-20')
                 );
             }
 
-            // Simulate alignment
             box.style.textAlign = p.align === 'center' ? 'center' : (p.align === 'right' ? 'right' : 'left');
             box.style.width = '100%';
             box.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
