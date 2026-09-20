@@ -1,0 +1,5 @@
+These scripts are just experimental ones for configuring the wifi on the pi from a webpage as well as the waveshare poe hat with oled screen https://www.waveshare.com/wiki/PoE_HAT_(B)
+
+Both of these scripts I currently class as beta while I work on them and get them to a point I am happy with. Until I have had a chance to do proper tests on them I cant garrentee anything. But they work together and if the wifi config on is installed as well as the oled on. On the web interface to configure the wifi there is a page to configure the screen.
+
+At some point I will likely combine these together along with the install for the network dashboard. A proper description and readme will be added later once I consider these scripts complete.
