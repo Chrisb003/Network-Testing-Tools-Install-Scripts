@@ -2,9 +2,9 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.3 (POSIX sh compatible)
+# Version: 1.4 (Pipe-Safe POSIX)
 # ==========================================
-VERSION="1.3"
+VERSION="1.4"
 
 # Determine the current user and home directory using standard POSIX commands
 if [ "$(id -u)" -eq 0 ]; then
@@ -28,10 +28,19 @@ DEFAULT_PORT="8080"
 # ==========================================
 # UNINSTALLATION LOGIC
 # ==========================================
-if [ -d "$APP_DIR" ] \vert{}\vert{} [ -f "$SERVICE_FILE" ]; then
+ALREADY_INSTALLED="no"
+if [ -d "$APP_DIR" ]; then
+    ALREADY_INSTALLED="yes"
+fi
+if [ -f "$SERVICE_FILE" ]; then
+    ALREADY_INSTALLED="yes"
+fi
+
+if [ "$ALREADY_INSTALLED" = "yes" ]; then
     echo "The WiFi Configurator (v$VERSION) appears to be already installed in$APP_DIR."
     printf "Do you want to uninstall it? (y/N): "
-    read uninstall_choice
+    # When piped via curl, we MUST read directly from /dev/tty
+    read uninstall_choice < /dev/tty
     
     case "$uninstall_choice" in
         [Yy]* )
@@ -61,7 +70,7 @@ fi
 # ==========================================
 echo "Ready to install Pi WiFi Configurator v$VERSION in$APP_DIR."
 printf "Proceed with installation? (y/N): "
-read install_choice
+read install_choice < /dev/tty
 
 case "$install_choice" in
     [Yy]* )
@@ -87,18 +96,18 @@ echo "$DEFAULT_PORT" > "$PORT_FILE"
 # AUTHENTICATION SETUP
 # ==========================================
 printf "Do you want to enable web authentication? (y/N): "
-read auth_choice
+read auth_choice < /dev/tty
 
 case "$auth_choice" in
     [Yy]* )
         printf "Enter username: "
-        read WEB_USER
+        read WEB_USER < /dev/tty
         
         printf "Enter password: "
-        # Hide typed text for password using stty
-        stty -echo
-        read WEB_PASS
-        stty echo
+        # Hide typed text for password using stty on the terminal
+        stty -echo < /dev/tty
+        read WEB_PASS < /dev/tty
+        stty echo < /dev/tty
         echo ""
         
         # Use python to safely generate a secure hash
@@ -561,3 +570,4 @@ echo "Installation complete!"
 echo "Port configuration is saved in: $PORT_FILE"
 echo "To reset auth physically, run:"
 echo "touch $APP_DIR/reset && sudo systemctl restart pi-wifi-app"
+echo "==================================================="
