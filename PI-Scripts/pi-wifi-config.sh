@@ -2,9 +2,9 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.0 (Pipe-Safe POSIX)
+# Version: 1.0.0 (Multi-Interface & Hotspot Aware)
 # ==========================================
-VERSION="1.0"
+VERSION="1.0.0"
 
 # Determine the current user and home directory using standard POSIX commands
 if [ "$(id -u)" -eq 0 ]; then
@@ -24,6 +24,7 @@ APP_DIR="$USER_HOME/pi-wifi-app"
 SERVICE_FILE="/etc/systemd/system/pi-wifi-app.service"
 PORT_FILE="$APP_DIR/webport"
 DEFAULT_PORT="8080"
+INSTALL_MODE="install"
 
 # ==========================================
 # UPDATE / UNINSTALLATION LOGIC
@@ -34,42 +35,50 @@ if [ -d "$APP_DIR" ] || [ -f "$SERVICE_FILE" ]; then
 fi
 
 if [ "$ALREADY_INSTALLED" = "yes" ]; then
-    echo "The WiFi Configurator appears to be already installed in $APP_DIR."
-    printf "Do you want to update to the latest version (v$VERSION)? (y/N): "
-    read update_choice < /dev/tty
+    echo "=================================================="
+    echo " OLED, Fan & Captive Portal Manager (v$VERSION)"
+    echo "=================================================="
+    echo "Status: An existing installation was detected."
+    echo "1) Update (keep existing environment, update scripts & configs)"
+    echo "2) Full Reinstall (rebuild virtual environment and reinstall packages)"
+    echo "3) Uninstall completely"
+    echo "4) Exit"
+    printf "Select an option [1-4]: "
+    read menu_choice < /dev/tty
     
-    case "$update_choice" in
-        [Yy]* )
+    case "$menu_choice" in
+        1)
+            INSTALL_MODE="update"
             echo "Proceeding with update. Your settings will be preserved..."
             ;;
-        * )
-            printf "Do you want to uninstall it? (y/N): "
-            read uninstall_choice < /dev/tty
-            case "$uninstall_choice" in
-                [Yy]* )
-                    echo "Escalating privileges to stop and remove services..."
-                    if [ -f "$SERVICE_FILE" ]; then
-                        sudo systemctl stop pi-wifi-app
-                        sudo systemctl disable pi-wifi-app
-                        sudo rm -f "$SERVICE_FILE"
-                        sudo systemctl daemon-reload
-                    fi
-                    
-                    echo "Removing application files..."
-                    sudo rm -rf "$APP_DIR"
-                    
-                    echo "Uninstallation complete."
-                    exit 0
-                    ;;
-                * )
-                    echo "Exiting without making changes."
-                    exit 0
-                    ;;
-            esac
+        2)
+            INSTALL_MODE="reinstall"
+            echo "Proceeding with full reinstall..."
+            sudo systemctl stop pi-wifi-app >/dev/null 2>&1
+            sudo rm -rf "$APP_DIR"
+            ;;
+        3)
+            echo "Escalating privileges to stop and remove services..."
+            if [ -f "$SERVICE_FILE" ]; then
+                sudo systemctl stop pi-wifi-app
+                sudo systemctl disable pi-wifi-app
+                sudo rm -f "$SERVICE_FILE"
+                sudo systemctl daemon-reload
+            fi
+            
+            echo "Removing application files..."
+            sudo rm -rf "$APP_DIR"
+            
+            echo "Uninstallation complete."
+            exit 0
+            ;;
+        4|* )
+            echo "Exiting without making changes."
+            exit 0
             ;;
     esac
 else
-    echo "Ready to install Pi WiFi Configurator v$VERSION in$APP_DIR."
+    echo "Ready to install Pi WiFi Configurator v$VERSION in $APP_DIR."
     printf "Proceed with installation? (y/N): "
     read install_choice < /dev/tty
 
@@ -103,31 +112,31 @@ fi
 # ==========================================
 # AUTHENTICATION SETUP
 # ==========================================
-# Only ask to set up auth if a user file doesn't already exist
-if [ ! -f "$APP_DIR/user" ]; then
-    printf "Do you want to enable web authentication? (y/N): "
-    read auth_choice < /dev/tty
+# If we are updating, skip the auth prompt entirely.
+if [ "$INSTALL_MODE" != "update" ]; then
+    if [ ! -f "$APP_DIR/user" ]; then
+        printf "Do you want to enable web authentication? (y/N): "
+        read auth_choice < /dev/tty
 
-    case "$auth_choice" in
-        [Yy]* )
-            printf "Enter username: "
-            read WEB_USER < /dev/tty
-            
-            printf "Enter password: "
-            # Hide typed text for password using stty on the terminal
-            stty -echo < /dev/tty
-            read WEB_PASS < /dev/tty
-            stty echo < /dev/tty
-            echo ""
-            
-            # Use python to safely generate a secure hash
-            WEB_HASH=$(python3 -c "import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.argv[1]))" "$WEB_PASS")
-            echo "$WEB_USER:$WEB_HASH" > "$APP_DIR/user"
-            echo "Authentication configured."
-            ;;
-    esac
+        case "$auth_choice" in
+            [Yy]* )
+                printf "Enter username: "
+                read WEB_USER < /dev/tty
+                
+                printf "Enter password: "
+                stty -echo < /dev/tty
+                read WEB_PASS < /dev/tty
+                stty echo < /dev/tty
+                echo ""
+                
+                WEB_HASH=$(python3 -c "import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.argv[1]))" "$WEB_PASS")
+                echo "$WEB_USER:$WEB_HASH" > "$APP_DIR/user"
+                echo "Authentication configured."
+                ;;
+        esac
+    fi
 else
-    echo "Existing authentication settings preserved."
+    echo "Update mode: Existing authentication settings preserved."
 fi
 
 echo "Writing app.py..."
@@ -146,6 +155,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 user_file = os.path.join(script_dir, 'user')
 reset_file = os.path.join(script_dir, 'reset')
 port_file_path = os.path.join(script_dir, 'webport')
+hotspot_policy_file = os.path.join(script_dir, 'hotspot_policy')
 
 if os.path.exists(reset_file):
     try:
@@ -157,6 +167,10 @@ if os.path.exists(reset_file):
         print(f"Startup: Error resetting user: {e}")
 
 def get_credentials():
+    """
+    Reads the 'user' file to retrieve the currently saved username and hashed password.
+    Returns (username, hash) if found, otherwise (None, None).
+    """
     if os.path.exists(user_file):
         with open(user_file, 'r') as f:
             content = f.read().strip()
@@ -164,19 +178,105 @@ def get_credentials():
                 return content.split(':', 1)
     return None, None
 
+def get_interfaces_info():
+    """
+    Retrieves all available WiFi network interfaces (e.g., wlan0, wlan1).
+    It checks active connections to determine if any interface is currently running
+    an Access Point (Hotspot). It automatically recommends an interface that is 
+    NOT currently being used as a hotspot.
+    """
+    try:
+        res = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'dev'], capture_output=True, text=True)
+        interfaces = []
+        default_iface = None
+        
+        for line in res.stdout.splitlines():
+            if ':wifi:' in line:
+                parts = line.split(':')
+                dev = parts[0]
+                state = parts[2]
+                conn = parts[3] if len(parts) > 3 else ''
+                
+                is_hotspot = False
+                # If connected, check if the connection mode is 'ap' (Access Point)
+                if state == 'connected' and conn:
+                    mode_res = subprocess.run(['nmcli', '-g', '802-11-wireless.mode', 'con', 'show', conn], capture_output=True, text=True)
+                    if mode_res.stdout.strip() == 'ap':
+                        is_hotspot = True
+                
+                interfaces.append({'name': dev, 'is_hotspot': is_hotspot})
+        
+        # Determine the best default interface (prefer one that isn't running a hotspot)
+        for iface in interfaces:
+            if not iface['is_hotspot']:
+                default_iface = iface['name']
+                break
+        
+        if not default_iface and interfaces:
+            default_iface = interfaces[0]['name']
+            
+        return {'interfaces': interfaces, 'default': default_iface}
+    except Exception as e:
+        return {'interfaces': [], 'default': ''}
+
+def get_hotspot_policy():
+    """
+    Checks if the user has opted to force Hotspots to start on boot.
+    If the setting hasn't been saved yet, it intelligently defaults to True 
+    if a hotspot is actively running right now.
+    """
+    if os.path.exists(hotspot_policy_file):
+        with open(hotspot_policy_file, 'r') as f:
+            return f.read().strip() == 'true'
+    
+    # Intelligent default: if a hotspot is currently running, assume they want it to persist
+    info = get_interfaces_info()
+    for iface in info['interfaces']:
+        if iface['is_hotspot']:
+            with open(hotspot_policy_file, 'w') as f:
+                f.write('true')
+            return True
+    return False
+
+def set_hotspot_priority(priority):
+    """
+    Finds all NetworkManager profiles configured as Access Points (Hotspots) 
+    and applies a high boot priority so they launch automatically over standard WiFi.
+    """
+    res = subprocess.run(['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show'], capture_output=True, text=True)
+    for line in res.stdout.splitlines():
+        if '802-11-wireless' in line:
+            name = line.split(':')[0]
+            mode_res = subprocess.run(['nmcli', '-g', '802-11-wireless.mode', 'con', 'show', name], capture_output=True, text=True)
+            if mode_res.stdout.strip() == 'ap':
+                subprocess.run(['nmcli', 'con', 'modify', name, 'connection.autoconnect', 'yes', 'connection.autoconnect-priority', str(priority)])
+
 @app.before_request
 def check_auth():
+    """
+    Middleware that runs before every request.
+    If authentication is enabled, it ensures the user has an active session.
+    If not, redirects them to the login page.
+    """
     if os.path.exists(user_file):
         if request.endpoint not in ['login', 'static'] and not session.get('logged_in'):
             return redirect(url_for('login'))
 
 @app.route('/')
 def index():
+    """
+    Serves the main frontend UI. Determines if the logout button should be shown
+    based on whether authentication is enabled.
+    """
     auth_enabled = os.path.exists(user_file)
     return render_template('index.html', auth_enabled=auth_enabled)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    """
+    Handles user login. Validates the submitted username and hashed password.
+    Sets a permanent session upon success.
+    """
     if request.method == 'POST':
         user = request.form.get('username')
         pw = request.form.get('password')
@@ -191,12 +291,28 @@ def login():
 
 @app.route('/logout')
 def logout():
+    """
+    Destroys the current user session and redirects to the login page.
+    """
     session.pop('logged_in', None)
     return redirect(url_for('login'))
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
+    """
+    Manages the settings page. Allows updating credentials and configuring 
+    the Hotspot Boot Priority settings.
+    """
     if request.method == 'POST':
+        # Save Hotspot Policy
+        force_hs = request.form.get('force_hotspot') == 'on'
+        with open(hotspot_policy_file, 'w') as f:
+            f.write('true' if force_hs else 'false')
+        
+        # Apply the priority immediately
+        set_hotspot_priority(100 if force_hs else 0)
+        
+        # Update credentials only if provided
         new_user = request.form.get('username')
         new_pw = request.form.get('password')
         if new_user and new_pw:
@@ -205,15 +321,34 @@ def settings():
                 f.write(f"{new_user}:{hashed}")
             session.permanent = True
             session['logged_in'] = True
-            return redirect(url_for('index'))
+            
+        return redirect(url_for('index'))
     
     saved_user, _ = get_credentials()
-    return render_template('settings.html', current_user=saved_user)
+    hs_policy = get_hotspot_policy()
+    return render_template('settings.html', current_user=saved_user, force_hotspot=hs_policy)
+
+@app.route('/interfaces', methods=['GET'])
+def interfaces():
+    """
+    API Route: Returns JSON metadata about available WiFi adapters and 
+    which ones are currently broadcasting a hotspot.
+    """
+    return jsonify(get_interfaces_info())
 
 @app.route('/scan', methods=['GET'])
 def scan():
+    """
+    API Route: Executes an active WiFi scan via nmcli.
+    Optionally restricts the scan to a specific WiFi adapter if 'device' is passed.
+    """
     try:
-        result = subprocess.run(['nmcli', '-t', '-f', 'SSID,SIGNAL', 'dev', 'wifi'], capture_output=True, text=True)
+        device = request.args.get('device')
+        cmd = ['nmcli', '-t', '-f', 'SSID,SIGNAL', 'dev', 'wifi']
+        if device:
+            cmd.extend(['ifname', device])
+            
+        result = subprocess.run(cmd, capture_output=True, text=True)
         networks = []
         if result.returncode == 0:
             lines = result.stdout.strip().split('\n')
@@ -230,30 +365,37 @@ def scan():
 
 @app.route('/connect', methods=['POST'])
 def connect():
+    """
+    API Route: Connects to a WiFi network.
+    Accepts SSID, optional password, auto-connect toggle, and specific device selection.
+    Automatically ensures Hotspot priority rules remain intact after connecting.
+    """
     data = request.json
     ssid = data.get('ssid')
-    # Intentionally omitted .strip() so valid spaces in passwords are sent intact
     password = data.get('password', '')
     autoconnect = data.get('autoconnect', True)
+    device = data.get('device')
 
     if not ssid:
         return jsonify({'status': 'error', 'message': 'SSID is required'})
 
     try:
         cmd = ['nmcli', 'dev', 'wifi', 'connect', ssid]
-        # Only append password argument if one was actually provided
         if password:
             cmd.extend(['password', password])
+        if device:
+            cmd.extend(['ifname', device])
             
-        # Due to not using shell=True, variables passed in this list are completely isolated
-        # from the shell, entirely preventing command injection attacks.
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode == 0:
-            # Set the autoconnect property for this profile (works for existing and new profiles)
             ac_val = 'yes' if autoconnect else 'no'
-            subprocess.run(['nmcli', 'con', 'modify', ssid, 'connection.autoconnect', ac_val])
+            subprocess.run(['nmcli', 'con', 'modify', ssid, 'connection.autoconnect', ac_val, 'connection.autoconnect-priority', '0'])
             
+            # Re-apply hotspot priority rule in case NM altered behavior
+            if get_hotspot_policy():
+                set_hotspot_priority(100)
+                
             return jsonify({'status': 'success', 'message': f'Successfully connected to {ssid}.'})
         else:
             return jsonify({'status': 'error', 'message': result.stderr.strip()})
@@ -262,18 +404,15 @@ def connect():
 
 @app.route('/disconnect', methods=['POST'])
 def disconnect():
+    """
+    API Route: Forcefully drops the active WiFi connection on the target device.
+    Falls back to wlan0 if the device cannot be explicitly determined.
+    """
     try:
-        # Find the active wifi device first
-        res = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,TYPE', 'dev'], capture_output=True, text=True)
-        wifi_dev = 'wlan0' # Fallback
-        for line in res.stdout.splitlines():
-            if 'wifi' in line:
-                wifi_dev = line.split(':')[0]
-                break
-                
-        result = subprocess.run(['nmcli', 'dev', 'disconnect', wifi_dev], capture_output=True, text=True)
+        device = request.json.get('device', 'wlan0')
+        result = subprocess.run(['nmcli', 'dev', 'disconnect', device], capture_output=True, text=True)
         if result.returncode == 0:
-            return jsonify({'status': 'success', 'message': 'Disconnected from current WiFi.'})
+            return jsonify({'status': 'success', 'message': f'Disconnected from {device}.'})
         else:
             return jsonify({'status': 'error', 'message': result.stderr.strip()})
     except Exception as e:
@@ -343,6 +482,9 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
         body.light-mode .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; }
         .checkbox-label input { width: auto; margin: 0 10px 0 0; cursor: pointer; }
+        
+        .warning-box { background-color: #3a2a00; color: #ffcc00; border: 1px solid #b38f00; padding: 10px; border-radius: 6px; font-size: 13px; margin-bottom: 15px; text-align: left; }
+        body.light-mode .warning-box { background-color: #fff3cd; color: #856404; border-color: #ffeeba; }
     </style>
 </head>
 <body>
@@ -360,6 +502,13 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
                 {% endif %}
             </div>
         </div>
+        
+        <select id="interfaceSelect" onchange="checkWarning()"></select>
+        
+        <div id="hotspotWarning" class="hidden warning-box">
+            ⚠️ <b>Note:</b> Connecting to a WiFi network on this adapter will temporarily disable your active Hotspot.
+        </div>
+
         <h2>WiFi Configurator</h2>
         <button id="scanBtn" class="primary-btn" onclick="scanNetworks()">Search for WiFi Networks</button>
         
@@ -382,6 +531,8 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
     </div>
 
     <script>
+        let interfacesData = [];
+
         function toggleTheme() {
             const isLight = document.body.classList.toggle('light-mode');
             localStorage.setItem('theme', isLight ? 'light' : 'dark');
@@ -389,15 +540,63 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
         }
         document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
 
+        async function loadInterfaces() {
+            try {
+                const res = await fetch('/interfaces');
+                const data = await res.json();
+                interfacesData = data.interfaces;
+                
+                const select = document.getElementById('interfaceSelect');
+                select.innerHTML = '';
+                
+                if (data.interfaces.length === 0) {
+                    select.style.display = 'none';
+                    return;
+                }
+                
+                data.interfaces.forEach(iface => {
+                    const opt = document.createElement('option');
+                    opt.value = iface.name;
+                    opt.innerText = iface.name + (iface.is_hotspot ? ' (Running Hotspot)' : '');
+                    select.appendChild(opt);
+                });
+                
+                if (data.default) {
+                    select.value = data.default;
+                }
+                checkWarning();
+                
+                // Hide select if only 1 interface exists
+                if (data.interfaces.length <= 1) {
+                    select.style.display = 'none';
+                }
+            } catch (err) {
+                console.error("Failed to load interfaces");
+            }
+        }
+
+        function checkWarning() {
+            const selected = document.getElementById('interfaceSelect').value;
+            const iface = interfacesData.find(i => i.name === selected);
+            const warning = document.getElementById('hotspotWarning');
+            if (iface && iface.is_hotspot) {
+                warning.classList.remove('hidden');
+            } else {
+                warning.classList.add('hidden');
+            }
+        }
+
         async function scanNetworks() {
             const scanBtn = document.getElementById('scanBtn');
             const connectForm = document.getElementById('connectForm');
             const ssidSelect = document.getElementById('ssidSelect');
+            const device = document.getElementById('interfaceSelect').value;
+            
             scanBtn.innerText = "Searching... (This takes a few seconds)";
             scanBtn.disabled = true;
             showMessage('', '');
             try {
-                const response = await fetch('/scan');
+                const response = await fetch('/scan?device=' + encodeURIComponent(device));
                 const data = await response.json();
                 if (data.status === 'success') {
                     ssidSelect.innerHTML = '<option value="">Select a network...</option>';
@@ -425,6 +624,7 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             const ssid = document.getElementById('ssidSelect').value;
             const password = document.getElementById('password').value;
             const autoconnect = document.getElementById('autoconnect').checked;
+            const device = document.getElementById('interfaceSelect').value;
             
             if (!ssid) return showMessage('error', 'Please select a network.');
 
@@ -435,12 +635,13 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
                 const response = await fetch('/connect', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ssid, password, autoconnect })
+                    body: JSON.stringify({ ssid, password, autoconnect, device })
                 });
                 const data = await response.json();
                 if (data.status === 'success') {
                     showMessage('success', data.message);
-                    document.getElementById('password').value = ''; 
+                    document.getElementById('password').value = '';
+                    loadInterfaces(); // Refresh UI State 
                 } else {
                     showMessage('error', 'Failed: ' + data.message);
                 }
@@ -453,14 +654,21 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
 
         async function disconnectNetwork() {
             const btn = document.getElementById('disconnectBtn');
+            const device = document.getElementById('interfaceSelect').value;
+            
             btn.innerText = "Disconnecting...";
             btn.disabled = true;
             showMessage('', '');
             try {
-                const response = await fetch('/disconnect', { method: 'POST' });
+                const response = await fetch('/disconnect', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device })
+                });
                 const data = await response.json();
                 if (data.status === 'success') {
                     showMessage('success', data.message);
+                    loadInterfaces(); // Refresh UI State
                 } else {
                     showMessage('error', 'Failed: ' + data.message);
                 }
@@ -477,6 +685,9 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             msgDiv.innerText = text;
             msgDiv.className = type;
         }
+
+        // Initialize Interfaces on page load
+        window.onload = loadInterfaces;
     </script>
 </body>
 </html>
@@ -579,12 +790,13 @@ cat << 'EOF' > "$APP_DIR/templates/settings.html"
         h2 { text-align: center; margin-top: 0; }
         .theme-toggle { position: absolute; top: 15px; right: 15px; background: transparent; color: var(--text-color); border: 1px solid var(--input-border); padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
         .theme-toggle:hover { background: var(--input-bg); }
-        input { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 16px; }
+        input[type="text"], input[type="password"] { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 16px; }
         button[type="submit"] { background: #e60042; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; font-weight: bold; transition: background 0.3s; margin-bottom: 15px;}
         button[type="submit"]:hover { background: #bf0037; }
         .back-link { display: block; text-align: center; text-decoration: none; color: var(--link-color); font-size: 14px;}
         .back-link:hover { color: var(--text-color); }
-        .info { background: var(--info-bg); padding: 15px; border-radius: 6px; font-size: 13px; color: var(--info-text); margin-bottom: 15px;}
+        .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; }
+        .checkbox-label input { width: auto; margin: 0 10px 0 0; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -594,17 +806,25 @@ cat << 'EOF' > "$APP_DIR/templates/settings.html"
     <div class="container">
         <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()">☀️ Light</button>
         <h2 style="margin-top: 15px;">Web Settings</h2>
-        <div class="info">
-            Submitting this form will enforce a login requirement to access the WiFi page.
-        </div>
+        
         <form method="POST">
+            <label class="checkbox-label" style="font-weight: bold;">
+                <input type="checkbox" name="force_hotspot" {% if force_hotspot %}checked{% endif %}>
+                Force Hotspot to start on boot (High Priority)
+            </label>
+            
+            <hr style="border: 0; border-top: 1px solid var(--input-border); margin: 20px 0;">
+            <div style="font-size: 13px; color: var(--info-text); margin-bottom: 15px;">
+                Leave fields below blank to keep existing web login credentials.
+            </div>
+            
             <label style="font-size:14px; font-weight:bold;">Username</label>
-            <input type="text" name="username" placeholder="New Username" value="{{ current_user or '' }}" required>
+            <input type="text" name="username" placeholder="New Username" value="{{ current_user or '' }}">
             
             <label style="font-size:14px; font-weight:bold;">Password</label>
-            <input type="password" name="password" placeholder="New Password" required>
+            <input type="password" name="password" placeholder="New Password">
             
-            <button type="submit">Update Credentials</button>
+            <button type="submit">Save Settings</button>
         </form>
         <a href="/" class="back-link">Cancel and return Home</a>
     </div>

@@ -3,7 +3,7 @@
 # ==================================================
 # OLED Monitor, PoE Fan & Captive Portal Manager
 # ==================================================
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.5.0"
 
 # Request sudo upfront and keep-alive
 sudo -v || { echo "This script requires sudo privileges. Exiting."; exit 1; }
@@ -36,7 +36,6 @@ if [ $INSTALLED -eq 1 ]; then
     echo "3) Uninstall completely"
     echo "4) Exit"
     
-    # Read from /dev/tty to support execution via curl ... | sh
     read -r -p "Select an option [1-4]: " choice < /dev/tty
     case "$choice" in
         1)
@@ -90,7 +89,6 @@ echo "=========================================="
 echo ">>> Enabling I2C Interface..."
 sudo raspi-config nonint do_i2c 0
 
-# Ensure I2C parameter is set in Raspberry Pi OS config files
 grep -q "^dtparam=i2c_arm=on" /boot/firmware/config.txt 2>/dev/null || echo "dtparam=i2c_arm=on" | sudo tee -a /boot/firmware/config.txt > /dev/null
 grep -q "^dtparam=i2c_arm=on" /boot/config.txt 2>/dev/null || echo "dtparam=i2c_arm=on" | sudo tee -a /boot/config.txt > /dev/null
 
@@ -120,7 +118,7 @@ import glob
 from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
 
-# Initialize OLED Screen
+# Initialize OLED Screen over I2C
 i2c = busio.I2C(board.SCL, board.SDA)
 disp = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c)
 
@@ -131,8 +129,12 @@ draw = ImageDraw.Draw(image)
 font = ImageFont.load_default()
 
 def get_webport():
+    """
+    Scans the home directory for webport configuration files in 
+    'Network-Testing-Tools' and 'pi-wifi-app', extracting and combining 
+    the active port numbers (e.g., '80/8080'). Defaults to '80' if none found.
+    """
     ports = []
-    # Check Network-Testing-Tools folder
     try:
         files1 = glob.glob('/home/*/Network-Testing-Tools/webport')
         if files1:
@@ -143,7 +145,6 @@ def get_webport():
     except Exception:
         pass
 
-    # Check pi-wifi-app folder
     try:
         files2 = glob.glob('/home/*/pi-wifi-app/webport')
         if files2:
@@ -159,6 +160,10 @@ def get_webport():
     return "80"
 
 def get_networks():
+    """
+    Queries active IPv4 network interfaces using system commands, 
+    filtering out loopback and virtual interfaces.
+    """
     networks = []
     try:
         out = subprocess.check_output(['ip', '-o', '-4', 'addr', 'show'], stderr=subprocess.DEVNULL).decode('utf-8')
@@ -174,6 +179,11 @@ def get_networks():
     return networks
 
 def get_hotspot_details():
+    """
+    Performs a safe, read-only inspection of active network manager wireless connections 
+    to fetch AP SSID, pre-shared key (password), interface name, and client connection status 
+    without modifying any system configurations.
+    """
     try:
         active_conns = subprocess.check_output(['nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show', '--active'], stderr=subprocess.DEVNULL).decode('utf-8').split('\n')
         for conn in active_conns:
@@ -199,6 +209,9 @@ def get_hotspot_details():
     return None, None, False, None
 
 def get_temp():
+    """
+    Measures the current Raspberry Pi CPU temperature in Celsius.
+    """
     try:
         out = subprocess.check_output(['vcgencmd', 'measure_temp'], stderr=subprocess.DEVNULL).decode('utf-8')
         return float(out.replace('temp=', '').replace('\'C\n', ''))
@@ -206,6 +219,9 @@ def get_temp():
         return 0.0
 
 def get_undervoltage():
+    """
+    Checks the system throttled flags to detect power undervoltage issues.
+    """
     try:
         out = subprocess.check_output(['vcgencmd', 'get_throttled'], stderr=subprocess.DEVNULL).decode('utf-8')
         val = int(out.replace('throttled=', '').strip(), 16)
@@ -213,6 +229,7 @@ def get_undervoltage():
     except Exception:
         return False
 
+# Execution timers and state variables
 last_hw_fetch = 0
 last_net_fetch = 0
 
@@ -231,13 +248,13 @@ try:
     while True:
         current_time = time.time()
         
-        # Check hardware warnings every 5 seconds
+        # Poll hardware vitals every 5 seconds
         if current_time - last_hw_fetch > 5:
             temp = get_temp()
             uv = get_undervoltage()
             last_hw_fetch = current_time
 
-        # Check network connections every 20 seconds
+        # Poll network and web ports every 20 seconds
         if current_time - last_net_fetch > 20:
             networks = get_networks()
             ap_ssid, ap_psk, ap_has_clients, ap_iface = get_hotspot_details()
@@ -246,7 +263,7 @@ try:
 
         draw.rectangle((0, 0, width, height), outline=0, fill=0)
         
-        # Flash warning if undervoltage or CPU temp > 75C
+        # Display hardware safety warnings if overheating or undervoltage detected
         if uv or temp > 75.0:
             if int(current_time * 2) % 2 == 0:
                 if uv:
@@ -265,16 +282,14 @@ try:
         for iface, ip in networks:
             if iface == ap_iface:
                 ap_ip = ip
-                # When client is connected, show as Pi: <ip>:<ports> on networks page
                 if ap_has_clients:
                     network_lines.append(f"Pi: {ip}:{web_port}")
             else:
-                network_lines.append(f"{iface}: {ip}")
+                network_lines.append(f"{iface}: {ip}:{web_port}")
 
         if network_lines:
             pages.append("networks")
             
-        # Hotspot SSID/PW page is shown when no clients are connected
         if ap_ssid and ap_psk and not ap_has_clients:
             pages.append("hotspot")
             
@@ -334,7 +349,6 @@ except KeyboardInterrupt:
     pass
 EOF
 
-# Ensure proper permissions on the monitor folder
 chown -R "$USER_NAME:$USER_NAME" "$OLED_DIR"
 
 echo ">>> Configuring Lighttpd for Captive Portal..."
@@ -345,8 +359,8 @@ grep -q 'index.sh' /etc/lighttpd/lighttpd.conf || echo 'index-file.names += ( "i
 echo ">>> Creating Dynamic Redirect Script (index.sh)..."
 cat << 'EOF' | sudo tee /var/www/html/index.sh > /dev/null
 #!/bin/bash
+# CGI script executed by lighttpd to handle dynamic captive portal port redirection
 PORT=80
-# Prefer Network-Testing-Tools/webport, fall back to pi-wifi-app/webport
 PORT_FILE=$(ls /home/*/Network-Testing-Tools/webport 2>/dev/null | head -n 1)
 if [ -z "$PORT_FILE" ]; then
     PORT_FILE=$(ls /home/*/pi-wifi-app/webport 2>/dev/null | head -n 1)
