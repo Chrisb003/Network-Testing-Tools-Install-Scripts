@@ -2,9 +2,9 @@
 
 # ==========================================
 # Pi WiFi Configurator Install Script
-# Version: 1.0.0
+# Version: 1.18.1 (Fully Restored & Commented)
 # ==========================================
-VERSION="1.01.0"
+VERSION="1.18.1"
 
 # Determine the current user and home directory using standard POSIX commands
 if [ "$(id -u)" -eq 0 ]; then
@@ -247,8 +247,32 @@ def set_hotspot_priority(priority):
         if '802-11-wireless' in line:
             name = line.split(':')[0]
             mode_res = subprocess.run(['nmcli', '-g', '802-11-wireless.mode', 'con', 'show', name], capture_output=True, text=True)
-            if mode_res.stdout.strip() == 'ap':
+            if mode_res.strip() == 'ap' or (mode_res.returncode == 0 and mode_res.stdout.strip() == 'ap'):
                 subprocess.run(['nmcli', 'con', 'modify', name, 'connection.autoconnect', 'yes', 'connection.autoconnect-priority', str(priority)])
+
+def get_hotspot_config():
+    """Detects existing NetworkManager Hotspot connection profile name, SSID, and Password."""
+    hs_name, hs_ssid, hs_psk, hs_active = "Hotspot", "", "", False
+    try:
+        res = subprocess.run(['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show'], capture_output=True, text=True)
+        for line in res.stdout.splitlines():
+            if '802-11-wireless' in line:
+                name = line.split(':')[0]
+                mode_res = subprocess.run(['nmcli', '-g', '802-11-wireless.mode', 'con', 'show', name], capture_output=True, text=True)
+                if mode_res.stdout.strip() == 'ap':
+                    hs_name = name
+                    hs_ssid = subprocess.run(['nmcli', '-g', '802-11-wireless.ssid', 'con', 'show', name], capture_output=True, text=True).stdout.strip()
+                    psk_res = subprocess.run(['sudo', 'nmcli', '--show-secrets', '-g', '802-11-wireless-security.psk', 'con', 'show', name], capture_output=True, text=True)
+                    hs_psk = psk_res.stdout.strip()
+                    
+                    # Check if active
+                    active_res = subprocess.run(['nmcli', '-t', '-f', 'NAME', 'con', 'show', '--active'], capture_output=True, text=True)
+                    if hs_name in active_res.stdout:
+                        hs_active = True
+                    break
+    except Exception:
+        pass
+    return {'name': hs_name, 'ssid': hs_ssid, 'password': hs_psk, 'active': hs_active}
 
 @app.before_request
 def check_auth():
@@ -293,14 +317,8 @@ def logout():
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
-    """Handles the Web Application Settings: updates Hotspot policies, Auth credentials, and Port bindings."""
+    """Handles the Web Application Settings: updates Auth credentials and Port bindings."""
     if request.method == 'POST':
-        # Save Hotspot Policy
-        force_hs = request.form.get('force_hotspot') == 'on'
-        with open(hotspot_policy_file, 'w') as f:
-            f.write('true' if force_hs else 'false')
-        set_hotspot_priority(100 if force_hs else 0)
-        
         # Process User Credentials
         new_user = request.form.get('username')
         new_pw = request.form.get('password')
@@ -339,7 +357,43 @@ def settings():
             """
             
         return redirect(url_for('index'))
-    return render_template('settings.html', current_user=get_credentials()[0], force_hotspot=get_hotspot_policy())
+    return render_template('settings.html', current_user=get_credentials()[0])
+
+@app.route('/hotspot', methods=['GET', 'POST'])
+def hotspot_page():
+    """Handles configuring, enabling/disabling, and prioritizing the Wi-Fi Hotspot."""
+    if request.method == 'POST':
+        action = request.form.get('action')
+        force_hs = request.form.get('force_hotspot') == 'on'
+        
+        # Save Hotspot Priority Policy
+        with open(hotspot_policy_file, 'w') as f:
+            f.write('true' if force_hs else 'false')
+        set_hotspot_priority(100 if force_hs else 0)
+        
+        hs_info = get_hotspot_config()
+        profile_name = hs_info['name']
+        
+        if action == 'save_and_toggle':
+            new_ssid = request.form.get('ssid')
+            new_pass = request.form.get('password')
+            enable_hs = request.form.get('enable_hotspot') == 'on'
+            
+            if new_ssid:
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', profile_name, '802-11-wireless.ssid', new_ssid])
+            if new_pass and len(new_pass) >= 8:
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', profile_name, '802-11-wireless-security.key-mgmt', 'wpa-psk', '802-11-wireless-security.psk', new_pass])
+                
+            if enable_hs:
+                subprocess.run(['sudo', 'nmcli', 'con', 'up', profile_name])
+            else:
+                subprocess.run(['sudo', 'nmcli', 'con', 'down', profile_name])
+                
+        return redirect(url_for('hotspot_page'))
+        
+    hs_data = get_hotspot_config()
+    force_hotspot = get_hotspot_policy()
+    return render_template('hotspot.html', hotspot=hs_data, force_hotspot=force_hotspot)
 
 # ==========================================
 # SYSTEM API & OLED ROUTES
@@ -553,7 +607,8 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
             <div>Pi WiFi Manager</div>
             <div style="display:flex; align-items:center;">
                 <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()">☀️ Light</button>
-                {% if oled_installed %}<a href="/oled" style="margin-right:10px;">OLED Config</a>{% endif %}
+                <a href="/hotspot" style="margin-right:10px;">Hotspot</a>
+                {% if oled_installed %}<a href="/oled" style="margin-right:10px;">OLED</a>{% endif %}
                 <a href="/settings">Settings</a>
                 {% if auth_enabled %}&nbsp;|&nbsp; <a href="/logout">Logout</a>{% endif %}
             </div>
@@ -694,6 +749,77 @@ cat << 'EOF' > "$APP_DIR/templates/index.html"
 </html>
 EOF
 
+echo "Writing templates/hotspot.html..."
+cat << 'EOF' > "$APP_DIR/templates/hotspot.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hotspot Configurator</title>
+    <style>
+        :root { --bg-color: #121212; --container-bg: #1e1e1e; --text-color: #ffffff; --input-bg: #2d2d2d; --input-border: #444; --link-color: #ff4d79; }
+        body.light-mode { --bg-color: #f0f2f5; --container-bg: #ffffff; --text-color: #333333; --input-bg: #ffffff; --input-border: #ddd; --link-color: #e60042; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; display: flex; justify-content: center; transition: background-color 0.3s, color 0.3s; }
+        .container { background: var(--container-bg); padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); width: 100%; max-width: 400px; margin-top: 20px; position: relative; }
+        h2 { text-align: center; margin-top: 0; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; font-size: 14px; }
+        .top-bar a { color: var(--link-color); text-decoration: none; font-weight: bold; }
+        .theme-toggle { background: transparent; color: var(--text-color); border: 1px solid var(--input-border); padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .theme-toggle:hover { background: var(--input-bg); }
+        input[type="text"], input[type="password"] { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text-color); border-radius: 6px; box-sizing: border-box; font-size: 16px; }
+        button[type="submit"] { background: #e60042; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; font-weight: bold; transition: background 0.3s; margin-bottom: 15px;}
+        button[type="submit"]:hover { background: #bf0037; }
+        .back-link { display: block; text-align: center; text-decoration: none; color: var(--link-color); font-size: 14px;}
+        .back-link:hover { color: var(--text-color); }
+        .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; }
+        .checkbox-label input { width: auto; margin: 0 10px 0 0; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <script>if (localStorage.getItem('theme') === 'light') document.body.classList.add('light-mode');</script>
+    <div class="container">
+        <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()">☀️ Light</button>
+        <h2 style="margin-top: 15px;">Hotspot Manager</h2>
+        
+        <form method="POST">
+            <input type="hidden" name="action" value="save_and_toggle">
+            
+            <label class="checkbox-label" style="font-weight: bold;">
+                <input type="checkbox" name="enable_hotspot" {% if hotspot.active %}checked{% endif %}>
+                Enable Access Point (Hotspot)
+            </label>
+            
+            <label class="checkbox-label" style="font-weight: bold;">
+                <input type="checkbox" name="force_hotspot" {% if force_hotspot %}checked{% endif %}>
+                Force Hotspot to start on boot (High Priority)
+            </label>
+            
+            <hr style="border: 0; border-top: 1px solid var(--input-border); margin: 20px 0;">
+            
+            <label style="font-size:14px; font-weight:bold;">Hotspot SSID (Name)</label>
+            <input type="text" name="ssid" value="{{ hotspot.ssid }}" required>
+            
+            <label style="font-size:14px; font-weight:bold;">Hotspot Password (min 8 chars)</label>
+            <input type="password" name="password" value="{{ hotspot.password }}" required>
+            
+            <button type="submit">Save & Apply Hotspot</button>
+        </form>
+        <a href="/" class="back-link">Return Home</a>
+    </div>
+    <script>
+        // Toggles the interface between dark and light themes, saving preference in localStorage
+        function toggleTheme() {
+            const isLight = document.body.classList.toggle('light-mode');
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+            document.getElementById('themeToggle').innerText = isLight ? '🌙 Dark' : '☀️ Light';
+        }
+        document.getElementById('themeToggle').innerText = document.body.classList.contains('light-mode') ? '🌙 Dark' : '☀️ Light';
+    </script>
+</body>
+</html>
+EOF
+
 echo "Writing templates/login.html..."
 cat << 'EOF' > "$APP_DIR/templates/login.html"
 <!DOCTYPE html>
@@ -763,8 +889,6 @@ cat << 'EOF' > "$APP_DIR/templates/settings.html"
         button[type="submit"]:hover { background: #bf0037; }
         .back-link { display: block; text-align: center; text-decoration: none; color: var(--link-color); font-size: 14px;}
         .back-link:hover { color: var(--text-color); }
-        .checkbox-label { display: flex; align-items: center; font-size: 14px; margin-bottom: 15px; cursor: pointer; }
-        .checkbox-label input { width: auto; margin: 0 10px 0 0; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -774,12 +898,6 @@ cat << 'EOF' > "$APP_DIR/templates/settings.html"
         <h2 style="margin-top: 15px;">Web Settings</h2>
         
         <form method="POST">
-            <label class="checkbox-label" style="font-weight: bold;">
-                <input type="checkbox" name="force_hotspot" {% if force_hotspot %}checked{% endif %}>
-                Force Hotspot to start on boot (High Priority)
-            </label>
-            
-            <hr style="border: 0; border-top: 1px solid var(--input-border); margin: 20px 0;">
             <div style="font-size: 13px; color: var(--info-text); margin-bottom: 15px;">
                 Leave fields below blank to keep existing web login credentials.
             </div>
