@@ -27,7 +27,7 @@ TOKEN=""
 APP_DIR="/Applications"
 APP_PATH="$APP_DIR/Network Diagnostics.app"
 DAEMON_PLIST="/Library/LaunchDaemons/com.network.diagnostics.plist"
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 
 # --- 2. EXISTING INSTALLATION CHECK & UNINSTALL OPTION ---
 if [ -d "$TARGET_DIR" ]; then
@@ -356,29 +356,28 @@ else
             mkdir -p "$TEMP_APP/Contents/MacOS"
             mkdir -p "$TEMP_APP/Contents/Resources"
             
-            # Use standard bash execution (NOT exec) so macOS TCC attributes the process correctly
+            # --- FIXED: Terminal Fallback Launcher ---
             cat << EOF > "$TEMP_APP/Contents/MacOS/launcher"
 #!/bin/bash
 cd "$TARGET_DIR" || exit 1
 
 # 1. Trigger permissions as a standard user before sudo runs
 /System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -s >/dev/null 2>&1 &
-"$TARGET_DIR/venv/bin/python" -c '
-import CoreLocation, time
-try:
-    m = CoreLocation.CLLocationManager.alloc().init()
-    m.requestAlwaysAuthorization()
-    m.startUpdatingLocation()
-except Exception as e:
-    print(e)
-' >/dev/null 2>&1 &
+"$TARGET_DIR/venv/bin/python3" -c 'import CoreLocation; m = CoreLocation.CLLocationManager.alloc().init(); m.requestAlwaysAuthorization(); m.startUpdatingLocation()' >/dev/null 2>&1 &
 
-# 2. Hand off execution to setup_env.py
-exec "$TARGET_DIR/venv/bin/python" "setup_env.py"
+# 2. Check if passwordless sudo is successfully configured
+if ! sudo -n "$TARGET_DIR/venv/bin/python3" "$TARGET_DIR/app.py" --help >/dev/null 2>&1; then
+    # Passwordless failed or was declined. Launch via Terminal so the user can enter their password securely.
+    osascript -e 'tell application "Terminal" to do script "cd \"$TARGET_DIR\" && sudo \"$TARGET_DIR/venv/bin/python3\" setup_env.py"'
+    osascript -e 'tell application "Terminal" to activate'
+    exit 0
+fi
+
+# 3. Hand off execution to setup_env.py silently in the background
+exec "$TARGET_DIR/venv/bin/python3" "setup_env.py"
 EOF
-chmod +x "$TEMP_APP/Contents/MacOS/launcher"
+            chmod +x "$TEMP_APP/Contents/MacOS/launcher"
             
-            # --- BUGFIX: ADDED THE MISSING "ALWAYS" INFO.PLIST STRINGS! ---
             cat << 'EOF' > "$TEMP_APP/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -450,8 +449,11 @@ EOF
                     REAL_DIR=$(python3 -c "import os; print(os.path.realpath(os.path.expanduser('$TARGET_DIR')))" 2>/dev/null)
                     if [ -z "$REAL_DIR" ]; then REAL_DIR="$TARGET_DIR"; fi
                     
-                    echo "$USER ALL=(ALL) NOPASSWD: $TARGET_DIR/venv/bin/python $TARGET_DIR/app.py" > "$SUDOERS_TMP"
+                    # --- FIXED: Whitelist BOTH python and python3 paths to prevent execution mismatch ---
+                    echo "$USER ALL=(ALL) NOPASSWD: $TARGET_DIR/venv/bin/python3 $TARGET_DIR/app.py" > "$SUDOERS_TMP"
+                    echo "$USER ALL=(ALL) NOPASSWD: $TARGET_DIR/venv/bin/python $TARGET_DIR/app.py" >> "$SUDOERS_TMP"
                     if [ "$REAL_DIR" != "$TARGET_DIR" ]; then
+                        echo "$USER ALL=(ALL) NOPASSWD: $REAL_DIR/venv/bin/python3 $REAL_DIR/app.py" >> "$SUDOERS_TMP"
                         echo "$USER ALL=(ALL) NOPASSWD: $REAL_DIR/venv/bin/python $REAL_DIR/app.py" >> "$SUDOERS_TMP"
                     fi
                     
