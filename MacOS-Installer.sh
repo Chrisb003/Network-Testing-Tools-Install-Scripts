@@ -27,7 +27,7 @@ TOKEN=""
 APP_DIR="/Applications"
 APP_PATH="$APP_DIR/Network Diagnostics.app"
 DAEMON_PLIST="/Library/LaunchDaemons/com.network.diagnostics.plist"
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 
 # --- 2. EXISTING INSTALLATION CHECK & UNINSTALL OPTION ---
 if [ -d "$TARGET_DIR" ]; then
@@ -356,25 +356,26 @@ else
             mkdir -p "$TEMP_APP/Contents/MacOS"
             mkdir -p "$TEMP_APP/Contents/Resources"
             
-            # --- FIXED: Terminal Fallback Launcher ---
+            # --- FIXED: Intelligent Terminal Fallback Launcher ---
             cat << EOF > "$TEMP_APP/Contents/MacOS/launcher"
 #!/bin/bash
 cd "$TARGET_DIR" || exit 1
 
 # 1. Trigger permissions as a standard user before sudo runs
 /System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -s >/dev/null 2>&1 &
-"$TARGET_DIR/venv/bin/python3" -c 'import CoreLocation; m = CoreLocation.CLLocationManager.alloc().init(); m.requestAlwaysAuthorization(); m.startUpdatingLocation()' >/dev/null 2>&1 &
+python3 -c 'import CoreLocation; m = CoreLocation.CLLocationManager.alloc().init(); m.requestAlwaysAuthorization(); m.startUpdatingLocation()' >/dev/null 2>&1 &
 
-# 2. Check if passwordless sudo is successfully configured
-if ! sudo -n "$TARGET_DIR/venv/bin/python3" "$TARGET_DIR/app.py" --help >/dev/null 2>&1; then
-    # Passwordless failed or was declined. Launch via Terminal so the user can enter their password securely.
-    osascript -e 'tell application "Terminal" to do script "cd \"$TARGET_DIR\" && sudo \"$TARGET_DIR/venv/bin/python3\" setup_env.py"'
+# 2. Check if passwordless mode was enabled during installation and the venv exists
+if [ -f "$TARGET_DIR/.nopasswd" ] && [ -d "$TARGET_DIR/venv" ]; then
+    # Venv exists and passwordless is enabled. Run silently in the background!
+    exec "$TARGET_DIR/venv/bin/python" "setup_env.py"
+else
+    # First run (needs venv built) OR passwordless mode declined.
+    # Launch via Terminal using standard system Python so it can prompt for a password cleanly.
+    osascript -e 'tell application "Terminal" to do script "cd \\"$TARGET_DIR\\" && python3 setup_env.py"'
     osascript -e 'tell application "Terminal" to activate'
     exit 0
 fi
-
-# 3. Hand off execution to setup_env.py silently in the background
-exec "$TARGET_DIR/venv/bin/python3" "setup_env.py"
 EOF
             chmod +x "$TEMP_APP/Contents/MacOS/launcher"
             
@@ -449,7 +450,7 @@ EOF
                     REAL_DIR=$(python3 -c "import os; print(os.path.realpath(os.path.expanduser('$TARGET_DIR')))" 2>/dev/null)
                     if [ -z "$REAL_DIR" ]; then REAL_DIR="$TARGET_DIR"; fi
                     
-                    # --- FIXED: Whitelist BOTH python and python3 paths to prevent execution mismatch ---
+                    # Whitelist both python and python3 to prevent execution mismatch
                     echo "$USER ALL=(ALL) NOPASSWD: $TARGET_DIR/venv/bin/python3 $TARGET_DIR/app.py" > "$SUDOERS_TMP"
                     echo "$USER ALL=(ALL) NOPASSWD: $TARGET_DIR/venv/bin/python $TARGET_DIR/app.py" >> "$SUDOERS_TMP"
                     if [ "$REAL_DIR" != "$TARGET_DIR" ]; then
@@ -461,6 +462,9 @@ EOF
                         sudo cp "$SUDOERS_TMP" /private/etc/sudoers.d/network-diagnostics
                         sudo chown root:wheel /private/etc/sudoers.d/network-diagnostics
                         sudo chmod 440 /private/etc/sudoers.d/network-diagnostics
+                        
+                        # --- FIXED: Create the hidden flag file to tell the shortcut to run invisibly! ---
+                        touch "$TARGET_DIR/.nopasswd"
                         echo "        [✓] Passwordless startup enabled securely."
                     else
                         echo "        [X] Failed to configure passwordless startup."
